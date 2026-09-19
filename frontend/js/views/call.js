@@ -19,7 +19,13 @@ export async function renderCall(callId) {
     );
   }
 
+  // Живёт вне #app: перерисовка экрана не должна прерывать воспроизведение.
+  document.getElementById('audio-sink')?.remove();
+  const audioSink = el('div', { id: 'audio-sink', style: 'display:none' });
+  document.body.append(audioSink);
+
   let room = null;
+  let livekit = null;
   let status = 'connecting';
   let statusDetail = '';
   let muted = false;
@@ -29,14 +35,25 @@ export async function renderCall(callId) {
 
   async function connect() {
     try {
-      const { Room, RoomEvent } = await import('/vendor/livekit-client.esm.mjs');
+      livekit = await import('/vendor/livekit-client.esm.mjs');
+      const { Room, RoomEvent } = livekit;
       room = new Room();
 
       room.on(RoomEvent.ParticipantConnected, syncParticipants);
       room.on(RoomEvent.ParticipantDisconnected, syncParticipants);
       room.on(RoomEvent.ActiveSpeakersChanged, syncParticipants);
+      room.on(RoomEvent.TrackMuted, syncParticipants);
+      room.on(RoomEvent.TrackUnmuted, syncParticipants);
+      // Элементы с аудио должны жить в DOM: открепление от документа
+      // делает воспроизведение ненадёжным.
       room.on(RoomEvent.TrackSubscribed, (track) => {
-        if (track.kind === 'audio') track.attach();
+        if (track.kind !== 'audio') return;
+        const audio = track.attach();
+        audio.autoplay = true;
+        audioSink.append(audio);
+      });
+      room.on(RoomEvent.TrackUnsubscribed, (track) => {
+        track.detach().forEach((element) => element.remove());
       });
       room.on(RoomEvent.Disconnected, () => {
         if (leaving) return;
@@ -74,21 +91,31 @@ export async function renderCall(callId) {
         speaking: Boolean(local?.isSpeaking),
         muted,
       },
-      ...(room ? [...room.remoteParticipants.values()] : []).map((p) => ({
-        identity: p.identity,
-        local: false,
-        speaking: p.isSpeaking,
-        muted: !p.isMicrophoneEnabled,
-      })),
+      ...(room ? [...room.remoteParticipants.values()] : []).map((p) => {
+        // isMicrophoneEnabled возвращает true, когда публикации нет вовсе,
+        // поэтому состояние читаем с самой публикации дорожки.
+        const micPublication = livekit
+          ? p.getTrackPublication(livekit.Track.Source.Microphone)
+          : null;
+        return {
+          identity: p.identity,
+          local: false,
+          speaking: p.isSpeaking,
+          muted: !micPublication || micPublication.isMuted,
+        };
+      }),
     ];
     draw();
   }
 
   async function toggleMute() {
     muted = !muted;
+    // Интерфейс реагирует сразу, не дожидаясь ответа SDK.
+    syncParticipants();
     try {
       await room?.localParticipant.setMicrophoneEnabled(!muted);
-    } catch {
+    } catch (err) {
+      console.error('микрофон:', err);
       micAvailable = false;
     }
     syncParticipants();
@@ -102,6 +129,7 @@ export async function renderCall(callId) {
     } catch {
       /* соединения могло и не быть */
     }
+    audioSink.remove();
     try {
       const result = await api(`/calls/${callId}/leave`, {
         method: 'POST',
@@ -165,56 +193,61 @@ export async function renderCall(callId) {
     return minutes > 0 ? `${minutes} мин ${seconds} сек` : `${seconds} сек`;
   }
 
+  // Узлы создаются один раз: участники в звонке обновляются часто, и полная
+  // перерисовка теряла бы нажатия по кнопкам, попавшие в момент замены DOM.
+  const statusLabel = document.createTextNode('');
+  const statusNode = el('p', { class: 'call-status' }, [el('span', { class: 'dot' }), statusLabel]);
+  const bannerNode = el('div', { class: 'banner warning' });
+  const participantsNode = el('div', { class: 'participants' });
+  const muteButton = el('button', { class: 'secondary', onclick: toggleMute });
+  const leaveButton = el('button', { class: 'danger', onclick: leave });
+
+  const screen = el('div', { class: 'call' }, [
+    el('div', {}, [
+      el('h1', { text: active.channelName ?? 'Звонок' }),
+      active.communityName && el('p', { class: 'subtitle', text: active.communityName }),
+    ]),
+    statusNode,
+    bannerNode,
+    participantsNode,
+    el('div', { class: 'call-controls' }, [muteButton, leaveButton]),
+    active.guest &&
+      el('p', {
+        class: 'hint',
+        text: 'Вы в звонке как гость — после выхода можно зарегистрироваться и остаться в сообществе',
+      }),
+  ]);
+
   function draw() {
-    const statusText = {
+    statusNode.className = `call-status ${status}`;
+    statusLabel.nodeValue = {
       connecting: 'Подключаемся…',
       connected: 'В звонке',
       failed: 'Нет связи',
     }[status];
 
-    mount(
-      el('div', { class: 'call' }, [
-        el('div', {}, [
-          el('h1', { text: active.channelName ?? 'Звонок' }),
-          active.communityName && el('p', { class: 'subtitle', text: active.communityName }),
-        ]),
-        el('p', { class: `call-status ${status}` }, [el('span', { class: 'dot' }), statusText]),
-        statusDetail && el('div', { class: 'banner warning', text: statusDetail }),
-        el(
-          'div',
-          { class: 'participants' },
-          participants.map((p) =>
-            el('div', { class: `participant${p.speaking ? ' speaking' : ''}` }, [
-              el('div', { class: 'avatar', text: (p.identity ?? '?').slice(0, 1) }),
-              el('div', { class: 'participant-name', text: p.local ? 'Вы' : p.identity }),
-              el('div', {
-                class: 'participant-state',
-                text: p.muted ? 'микрофон выключен' : p.speaking ? 'говорит' : 'слушает',
-              }),
-            ]),
-          ),
-        ),
-        el('div', { class: 'call-controls' }, [
-          el('button', {
-            class: 'secondary',
-            text: muted ? 'Включить микрофон' : 'Выключить микрофон',
-            disabled: !micAvailable || status !== 'connected' ? 'true' : null,
-            onclick: toggleMute,
-          }),
-          el('button', {
-            class: 'danger',
-            text: leaving ? 'Выходим…' : 'Выйти из звонка',
-            disabled: leaving ? 'true' : null,
-            onclick: leave,
+    bannerNode.textContent = statusDetail;
+    bannerNode.hidden = !statusDetail;
+
+    participantsNode.replaceChildren(
+      ...participants.map((p) =>
+        el('div', { class: `participant${p.speaking ? ' speaking' : ''}` }, [
+          el('div', { class: 'avatar', text: (p.identity ?? '?').slice(0, 1) }),
+          el('div', { class: 'participant-name', text: p.local ? 'Вы' : p.identity }),
+          el('div', {
+            class: 'participant-state',
+            text: p.muted ? 'микрофон выключен' : p.speaking ? 'говорит' : 'слушает',
           }),
         ]),
-        active.guest &&
-          el('p', {
-            class: 'hint',
-            text: 'Вы в звонке как гость — после выхода можно зарегистрироваться и остаться в сообществе',
-          }),
-      ]),
+      ),
     );
+
+    muteButton.textContent = muted ? 'Включить микрофон' : 'Выключить микрофон';
+    muteButton.disabled = !micAvailable || status !== 'connected';
+    leaveButton.textContent = leaving ? 'Выходим…' : 'Выйти из звонка';
+    leaveButton.disabled = leaving;
+
+    if (!screen.isConnected) mount(screen);
   }
 
   draw();

@@ -34,12 +34,26 @@ docker compose up --build
 
 ### Локальный запуск без Docker
 
+Пригодится, если образы Docker Hub недоступны.
+
 ```bash
 createdb community && psql -d community -f db/schema.sql
 cd backend && npm install
 DATABASE_URL=postgres://postgres:postgres@localhost:5432/community \
 EXPOSE_DEV_CODE=true npm start
 ```
+
+Для звонков отдельно нужен LiveKit — бинарник берётся с GitHub Releases:
+
+```bash
+curl -sL -o livekit.tar.gz \
+  https://github.com/livekit/livekit/releases/download/v1.10.0/livekit_1.10.0_linux_amd64.tar.gz
+tar xzf livekit.tar.gz && ./livekit-server --dev
+```
+
+Версия сервера должна быть не ниже 1.9: с более старыми клиент `livekit-client` 2.x
+не публикует микрофон — публикация зависает без ошибки. Без LiveKit работает всё,
+кроме звука: экран звонка покажет, что связи нет, и корректно завершит участие.
 
 ### Переменные окружения
 
