@@ -1,3 +1,6 @@
+// Аналитический лог продукта: единственная точка записи событий в слой
+// Bronze (таблица events_bronze). Все шесть событий из спецификации
+// проходят через logEvent — см. раздел «Аналитика» в README.
 import { randomUUID } from 'node:crypto';
 import { query } from '../db.js';
 import { config } from '../config.js';

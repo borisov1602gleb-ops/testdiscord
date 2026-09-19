@@ -1,3 +1,5 @@
+// Сообщества: создание (вместе с владельцем и парой каналов), список своих
+// сообществ для боковой панели и карточка одного сообщества с его каналами.
 import { Router } from 'express';
 import { query, withTransaction } from '../db.js';
 import { asyncHandler, HttpError } from '../lib/http.js';

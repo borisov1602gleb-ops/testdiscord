@@ -1,3 +1,5 @@
+// Роутинг по адресной строке (через #). Маршруты, помеченные open,
+// доступны гостю без входа — на них держится сценарий «пришёл по ссылке».
 import { store } from './store.js';
 import { renderLogin } from './views/login.js';
 import { renderHome, disconnectRealtime } from './views/home.js';
