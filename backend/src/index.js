@@ -1,4 +1,6 @@
 import http from 'node:http';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import cors from 'cors';
 import { config } from './config.js';
@@ -23,6 +25,15 @@ app.get('/health', async (_req, res) => {
     res.status(503).json({ status: 'db_unavailable' });
   }
 });
+
+// Клиент и SDK LiveKit отдаются тем же сервером — отдельный веб-сервер
+// и сборка на этапе MVP не нужны.
+const srcDir = path.dirname(fileURLToPath(import.meta.url));
+app.use(
+  '/vendor',
+  express.static(path.join(srcDir, '..', 'node_modules', 'livekit-client', 'dist')),
+);
+app.use(express.static(path.join(srcDir, '..', '..', 'frontend')));
 
 app.use('/auth', authRouter);
 app.use('/communities', communitiesRouter);

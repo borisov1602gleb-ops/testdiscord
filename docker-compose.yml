@@ -17,7 +17,9 @@ services:
       retries: 10
 
   backend:
-    build: ./backend
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     environment:
       PORT: 3000
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/community

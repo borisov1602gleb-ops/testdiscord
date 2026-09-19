@@ -27,7 +27,7 @@ messagesRouter.post(
     );
     const message = rows[0];
 
-    emitMessage(channelId, message);
+    emitMessage(channelId, { ...message, author_email: req.user.email });
     await logEvent(EVENT_TYPES.MESSAGE_SENT, {
       user_id: req.user.id,
       community_id: channel.community_id,
@@ -35,7 +35,7 @@ messagesRouter.post(
       message_id: message.id,
     });
 
-    res.status(201).json({ message });
+    res.status(201).json({ message: { ...message, author_email: req.user.email } });
   }),
 );
 
