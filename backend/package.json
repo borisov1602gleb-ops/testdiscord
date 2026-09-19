@@ -15,6 +15,7 @@
     "cors": "^2.8.5",
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
+    "livekit-client": "^2.22.3",
     "livekit-server-sdk": "^2.7.2",
     "pg": "^8.13.1",
     "socket.io": "^4.8.1"

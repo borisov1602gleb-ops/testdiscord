@@ -1,11 +1,13 @@
 FROM node:20-alpine
 
-WORKDIR /app
+# Контекст сборки — корень репозитория: образ отдаёт и API, и статику клиента.
+WORKDIR /app/backend
 
-COPY package.json package-lock.json* ./
+COPY backend/package.json backend/package-lock.json* ./
 RUN npm install --omit=dev
 
-COPY src ./src
+COPY backend/src ./src
+COPY frontend /app/frontend
 
 EXPOSE 3000
 CMD ["node", "src/index.js"]

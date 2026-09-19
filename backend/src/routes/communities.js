@@ -42,6 +42,22 @@ communitiesRouter.post(
 );
 
 communitiesRouter.get(
+  '/',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { rows } = await query(
+      `SELECT c.*, m.role
+       FROM community_members m
+       JOIN communities c ON c.id = m.community_id
+       WHERE m.user_id = $1
+       ORDER BY m.joined_at`,
+      [req.user.id],
+    );
+    res.json({ communities: rows });
+  }),
+);
+
+communitiesRouter.get(
   '/:id',
   requireAuth,
   asyncHandler(async (req, res) => {
