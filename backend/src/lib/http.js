@@ -1,3 +1,6 @@
+// Работа с ошибками HTTP: HttpError для ожидаемых ситуаций (их текст уходит
+// клиенту), asyncHandler — чтобы отказ промиса в маршруте не остался
+// незамеченным, errorHandler — единый ответ вместо падения процесса.
 export class HttpError extends Error {
   constructor(status, message, details) {
     super(message);

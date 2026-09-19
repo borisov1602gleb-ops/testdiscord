@@ -1,3 +1,7 @@
+// Звонки. Backend отвечает за состояние (кто когда подключился и сколько
+// пробыл) и за выдачу токена доступа; сам звук идёт мимо него — напрямую
+// между браузером и LiveKit. Поэтому участие корректно закрывается даже
+// тогда, когда сервер звонков недоступен.
 import { Router } from 'express';
 import { query, withTransaction } from '../db.js';
 import { asyncHandler, HttpError } from '../lib/http.js';
@@ -109,12 +113,30 @@ callsRouter.post(
       throw err;
     }
 
-    const { rows: participantRows } = await query(
-      `INSERT INTO call_participants (call_id, user_id, anonymous_id)
-       VALUES ($1, $2, $3)
-       RETURNING *`,
+    // Повторное подключение (перезагрузка страницы, обрыв связи) не должно
+    // плодить незакрытые записи участия: иначе звонок никогда не завершится,
+    // а duration_sec первой записи потеряется.
+    const { rows: openRows } = await query(
+      `SELECT * FROM call_participants
+       WHERE call_id = $1
+         AND left_at IS NULL
+         AND (($2::uuid IS NOT NULL AND user_id = $2::uuid)
+              OR ($3::text IS NOT NULL AND anonymous_id = $3::text))
+       ORDER BY joined_at DESC
+       LIMIT 1`,
       [callId, req.user?.id ?? null, anonymousId],
     );
+
+    const participantRows = openRows.length
+      ? openRows
+      : (
+          await query(
+            `INSERT INTO call_participants (call_id, user_id, anonymous_id)
+             VALUES ($1, $2, $3)
+             RETURNING *`,
+            [callId, req.user?.id ?? null, anonymousId],
+          )
+        ).rows;
 
     const identity = req.user?.id ?? anonymousId;
     const livekitToken = await createCallToken({

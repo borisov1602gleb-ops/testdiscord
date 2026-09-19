@@ -1,3 +1,6 @@
+// Реалтайм-слой чата: клиент подписывается на канал по WebSocket и получает
+// новые сообщения. Источник правды — по-прежнему HTTP-маршрут /messages,
+// сюда сообщение попадает уже после записи в базу.
 import { Server } from 'socket.io';
 import { verifyToken } from '../middleware/auth.js';
 import { requireMembership, getChannel } from './access.js';

@@ -1,3 +1,7 @@
+// Вход и регистрация по коду на почту: /auth/send-code выдаёт код,
+// /auth/verify-code его проверяет, заводит пользователя при первом входе
+// и возвращает токен. Здесь же гостевое участие в звонке привязывается
+// к появившемуся user_id.
 import { Router } from 'express';
 import { randomInt } from 'node:crypto';
 import { query, withTransaction } from '../db.js';

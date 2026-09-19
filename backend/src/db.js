@@ -1,3 +1,5 @@
+// Доступ к PostgreSQL: общий пул подключений, обёртка для транзакций и
+// ожидание готовности базы при старте (в Docker backend поднимается раньше неё).
 import pg from 'pg';
 import { config } from './config.js';
 

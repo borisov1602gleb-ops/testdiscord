@@ -1,3 +1,5 @@
+// Сообщения в текстовых каналах: отправка (с рассылкой по WebSocket всем,
+// кто сейчас в канале) и история при открытии канала.
 import { Router } from 'express';
 import { query } from '../db.js';
 import { asyncHandler, HttpError } from '../lib/http.js';
