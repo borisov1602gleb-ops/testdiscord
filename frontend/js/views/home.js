@@ -114,6 +114,9 @@ export async function renderHome(communityId) {
     const composerInput = el('input', {
       class: 'input',
       type: 'text',
+      // Тот же предел, что и на сервере: лучше не дать набрать лишнее,
+      // чем показать ошибку после отправки.
+      maxlength: '2000',
       placeholder: activeChannel ? `Написать в #${activeChannel.name}` : 'Нет текстового канала',
       disabled: activeChannel ? null : 'true',
     });

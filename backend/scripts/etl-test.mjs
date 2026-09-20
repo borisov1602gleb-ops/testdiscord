@@ -11,7 +11,8 @@
 // Запуск: node scripts/etl-test.mjs (нужен доступ к базе, backend не нужен).
 import { randomUUID } from 'node:crypto';
 import { pool, waitForDatabase } from '../src/db.js';
-import { ensureAnalyticsSchema, runEtl } from '../src/etl/index.js';
+import { applySchema } from '../src/lib/schema.js';
+import { runEtl } from '../src/etl/index.js';
 
 let failures = 0;
 function check(label, actual, expected) {
@@ -36,7 +37,7 @@ async function bronze(eventType, payload, { minutesAgo = 0 } = {}) {
 }
 
 await waitForDatabase();
-await ensureAnalyticsSchema();
+await applySchema();
 
 // ===== подготовка: сообщество с владельцем и каналами =====
 const { rows: ownerRows } = await pool.query(
@@ -207,6 +208,27 @@ const { rows: leaked } = await pool.query(
   [Object.values(rejectedIds)],
 );
 check('мусор не попал в Silver', leaked[0].n, 0);
+
+// ===== событие про несуществующего пользователя не ломает прогон =====
+// Bronze принимает что угодно, поэтому в логе может оказаться user_id,
+// которого в базе нет. Раньше одно такое событие роняло ETL на внешнем
+// ключе, и витрины замирали навсегда.
+const ghostId = await bronze('registration_completed', {
+  user_id: '11111111-1111-1111-1111-111111111111',
+  anonymous_id: `ghost-${stamp}`,
+});
+let ghostRunFailed = false;
+try {
+  await runEtl();
+} catch {
+  ghostRunFailed = true;
+}
+check('событие про несуществующего пользователя не ломает ETL', ghostRunFailed, false);
+const { rows: ghostRows } = await pool.query(
+  'SELECT count(*)::int AS n FROM events_silver WHERE event_id = $1',
+  [ghostId],
+);
+check('такое событие всё равно попадает в Silver', ghostRows[0].n, 1);
 
 // ===== повторный прогон ничего не задваивает =====
 const { rows: beforeRows } = await pool.query(

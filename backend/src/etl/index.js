@@ -5,9 +5,6 @@
 // не должны накладываться друг на друга (по расписанию и по кнопке
 // «Обновить» одновременно), поэтому берётся блокировка уровня транзакции:
 // если её уже держит другой прогон, мы просто пропускаем свой.
-import fs from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { pool, withTransaction } from '../db.js';
 import { config } from '../config.js';
 import { loadSilver } from './silver.js';
@@ -15,16 +12,6 @@ import { buildGold } from './gold.js';
 
 // Произвольное, но постоянное число — адрес этой блокировки в PostgreSQL.
 const LOCK_ID = 864213;
-
-const srcDir = path.dirname(fileURLToPath(import.meta.url));
-const layersSqlPath = path.join(srcDir, '..', '..', '..', 'db', 'analytics-layers.sql');
-
-// DDL слоёв идемпотентный, поэтому применяется при каждом старте: так
-// обновление кода не требует отдельного шага с миграцией.
-export async function ensureAnalyticsSchema() {
-  const sql = await fs.readFile(layersSqlPath, 'utf8');
-  await pool.query(sql);
-}
 
 export async function runEtl() {
   const startedAt = Date.now();

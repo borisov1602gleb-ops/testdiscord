@@ -12,6 +12,13 @@ import { getProfile, PUBLIC_NAME_SQL } from '../lib/users.js';
 
 export const messagesRouter = Router();
 
+// Ограничение длины сообщения. Не из вредности: без него одно сообщение
+// может весить мегабайты — это и база, и трафик всем, кто в канале.
+const MAX_CONTENT_LENGTH = 2000;
+// Сколько сообщений отдаём за раз: по умолчанию и максимум.
+const DEFAULT_LIMIT = 50;
+const MAX_LIMIT = 200;
+
 messagesRouter.post(
   '/',
   requireAuth,
@@ -19,6 +26,9 @@ messagesRouter.post(
     const channelId = parseUuid(req.body?.channel_id, 'channel_id');
     const content = String(req.body?.content ?? '').trim();
     if (!content) throw new HttpError(400, 'content_required');
+    if (content.length > MAX_CONTENT_LENGTH) {
+      throw new HttpError(400, 'content_too_long', { max_length: MAX_CONTENT_LENGTH });
+    }
 
     const channel = await getChannel(channelId);
     if (channel.type !== 'text') throw new HttpError(400, 'channel_is_not_text');
@@ -50,7 +60,12 @@ messagesRouter.get(
   requireAuth,
   asyncHandler(async (req, res) => {
     const channelId = parseUuid(req.query.channel_id, 'channel_id');
-    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    // limit приходит от клиента, поэтому зажимаем с обеих сторон:
+    // отрицательное значение раньше уходило в SQL и роняло запрос.
+    const requested = Number(req.query.limit);
+    const limit = Number.isFinite(requested) && requested > 0
+      ? Math.min(Math.floor(requested), MAX_LIMIT)
+      : DEFAULT_LIMIT;
 
     const channel = await getChannel(channelId);
     await requireMembership(req.user.id, channel.community_id);

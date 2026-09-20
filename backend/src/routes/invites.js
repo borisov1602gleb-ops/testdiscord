@@ -24,6 +24,11 @@ invitesRouter.post(
     if (maxUses != null && (!Number.isInteger(maxUses) || maxUses < 1)) {
       throw new HttpError(400, 'invalid_max_uses');
     }
+    // Дату разбираем сами: нечитаемая строка иначе доезжала до PostgreSQL
+    // и возвращалась пользователю как внутренняя ошибка сервера.
+    if (expiresAt != null && Number.isNaN(new Date(expiresAt).getTime())) {
+      throw new HttpError(400, 'invalid_expires_at');
+    }
 
     const { rows } = await query(
       `INSERT INTO invites (community_id, created_by, expires_at, max_uses)
