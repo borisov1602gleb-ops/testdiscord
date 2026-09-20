@@ -3,7 +3,7 @@
 // его возвращаться по ссылке ещё раз.
 import { api } from '../api.js';
 import { store } from '../store.js';
-import { el, mount } from '../dom.js';
+import { el, mount, icon } from '../dom.js';
 import { navigate } from '../router.js';
 
 export function renderLogin() {
@@ -14,6 +14,7 @@ export function renderLogin() {
   let busy = false;
 
   async function sendCode() {
+    if (busy || !email) return;
     busy = true;
     error = null;
     draw();
@@ -30,6 +31,7 @@ export function renderLogin() {
   }
 
   async function verifyCode(code) {
+    if (busy) return;
     busy = true;
     error = null;
     draw();
@@ -60,16 +62,19 @@ export function renderLogin() {
     }
   }
 
-  function draw() {
+  function drawEmailStep() {
     // Кнопку переключаем напрямую: перерисовка на каждый символ увела бы фокус
     // из поля ввода.
     const submit = el('button', {
+      class: 'btn btn-primary btn-block',
+      type: 'submit',
       text: busy ? 'Отправляем…' : 'Получить код',
-      onclick: sendCode,
     });
     submit.disabled = busy || !email;
 
-    const emailInput = el('input', {
+    const input = el('input', {
+      class: 'input',
+      id: 'login-email',
       type: 'email',
       placeholder: 'you@example.com',
       value: email,
@@ -78,61 +83,70 @@ export function renderLogin() {
         email = e.target.value;
         submit.disabled = busy || !email;
       },
-      onkeydown: (e) => {
-        if (e.key === 'Enter' && email) sendCode();
-      },
     });
 
-    const codeInput = el('input', {
+    return el('form', { class: 'auth-card', onsubmit: (e) => (e.preventDefault(), sendCode()) }, [
+      el('div', { class: 'auth-mark' }, [icon('mark', 14), el('span', { text: 'Сообщества' })]),
+      el('h1', { class: 'auth-title', text: 'Вход' }),
+      el('p', { class: 'auth-sub', text: 'Пришлём код на почту — пароль не нужен' }),
+      el('div', { class: 'field' }, [
+        el('label', { class: 'field-label', for: 'login-email', text: 'Почта' }),
+        input,
+      ]),
+      el('p', { class: 'field-error', text: error ?? ' ' }),
+      submit,
+    ]);
+  }
+
+  function drawCodeStep() {
+    const input = el('input', {
+      class: 'input input-code',
+      id: 'login-code',
       type: 'text',
       inputmode: 'numeric',
-      placeholder: '000000',
       maxlength: '6',
+      placeholder: '······',
       autofocus: 'true',
-      onkeydown: (e) => {
-        if (e.key === 'Enter' && e.target.value.length === 6) verifyCode(e.target.value);
-      },
     });
 
-    const card =
-      step === 'email'
-        ? el('div', { class: 'card' }, [
-            el('h1', { text: 'Вход' }),
-            el('p', { class: 'subtitle', text: 'Пришлём код на почту — пароль не нужен' }),
-            el('div', { class: 'field' }, [el('label', { text: 'Почта' }), emailInput]),
-            el('div', { class: 'actions' }, [submit]),
-            error && el('p', { class: 'error', text: error }),
-          ])
-        : el('div', { class: 'card' }, [
-            el('h1', { text: 'Код из письма' }),
-            el('p', { class: 'subtitle', text: `Отправили на ${email}` }),
-            el('div', { class: 'field' }, [el('label', { text: 'Код' }), codeInput]),
-            el('div', { class: 'actions' }, [
-              el('button', {
-                text: busy ? 'Проверяем…' : 'Войти',
-                disabled: busy ? 'true' : null,
-                onclick: () => verifyCode(codeInput.value),
-              }),
-              el('button', {
-                class: 'secondary',
-                text: 'Изменить почту',
-                onclick: () => {
-                  step = 'email';
-                  devCode = null;
-                  error = null;
-                  draw();
-                },
-              }),
-            ]),
-            devCode &&
-              el('p', { class: 'hint' }, [
-                'Почта на этапе MVP — заглушка, код: ',
-                el('code', { text: devCode }),
-              ]),
-            error && el('p', { class: 'error', text: error }),
-          ]);
+    return el(
+      'form',
+      { class: 'auth-card', onsubmit: (e) => (e.preventDefault(), verifyCode(input.value)) },
+      [
+        el('h1', { class: 'auth-title', text: 'Код из письма' }),
+        el('p', { class: 'auth-sub', text: `Отправили на ${email}` }),
+        el('div', { class: 'field' }, [
+          el('label', { class: 'field-label', for: 'login-code', text: 'Код' }),
+          input,
+        ]),
+        el('p', { class: 'field-error', text: error ?? ' ' }),
+        el('button', {
+          class: 'btn btn-primary btn-block',
+          type: 'submit',
+          text: busy ? 'Проверяем…' : 'Войти',
+        }),
+        el('button', {
+          class: 'btn btn-secondary btn-block',
+          type: 'button',
+          text: 'Изменить почту',
+          onclick: () => {
+            step = 'email';
+            devCode = null;
+            error = null;
+            draw();
+          },
+        }),
+        devCode &&
+          el('p', { class: 'field-hint' }, [
+            'Почта на этапе MVP — заглушка, код: ',
+            el('code', { text: devCode }),
+          ]),
+      ],
+    );
+  }
 
-    mount(el('div', { class: 'centered' }, [card]));
+  function draw() {
+    mount(el('div', { class: 'auth' }, [step === 'email' ? drawEmailStep() : drawCodeStep()]));
   }
 
   draw();
