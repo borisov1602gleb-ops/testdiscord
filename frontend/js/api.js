@@ -48,7 +48,13 @@ export async function api(path, { method = 'GET', body, auth = true } = {}) {
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    if (res.status === 401 && store.isAuthenticated) store.clearSession();
+    // Токен протух или подписан другим ключом — это не поломка, а повод
+    // спокойно отправить человека на вход. Роутер не импортируем: он сам
+    // зависит от экранов, а те — от этого файла.
+    if (res.status === 401 && store.isAuthenticated) {
+      store.clearSession();
+      location.hash = '#/login';
+    }
     throw new ApiError(data.error, res.status, data.details);
   }
   return data;

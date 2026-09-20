@@ -5,6 +5,9 @@ import { el, mount } from './dom.js';
 
 window.addEventListener('unhandledrejection', (event) => {
   console.error(event.reason);
+  // Истёкшая сессия уже увела на экран входа (см. api.js) — показывать
+  // поверх него «что-то сломалось» незачем.
+  if (event.reason?.status === 401) return;
   mount(
     el('div', { class: 'centered' }, [
       el('div', { class: 'card' }, [
