@@ -1,0 +1,99 @@
+# Прогон всех проверок на каждый push и pull request.
+#
+# Смысл в том, чтобы не помнить про четыре скрипта: любая правка, из-за
+# которой ломается сценарий, права доступа, граничный случай или сборка
+# аналитических слоёв, видна прямо в GitHub.
+name: Тесты
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    name: e2e, граничные случаи, слои, WebSocket
+    runs-on: ubuntu-latest
+
+    # База поднимается сервисным контейнером: тот же PostgreSQL 16, что и
+    # в docker-compose, только без остальной обвязки — звонки и TURN для
+    # этих проверок не нужны.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: community
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d community"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/community
+      JWT_SECRET: ci-secret
+      # Код входа возвращается в ответе: без этого тесты не смогут войти,
+      # ведь писем в CI никто не читает.
+      EXPOSE_DEV_CODE: 'true'
+      # Витрины в тестах пересобираются явно, расписание тут только мешало бы.
+      ETL_INTERVAL_SEC: '0'
+      PGHOST: localhost
+      PGUSER: postgres
+      PGPASSWORD: postgres
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Установить зависимости
+        working-directory: backend
+        run: npm ci
+
+      - name: Применить схему продукта
+        # Миграции и схему аналитических слоёв backend накатывает сам при
+        # старте — здесь только базовые таблицы.
+        run: psql -d community -f db/schema.sql
+
+      - name: Запустить backend
+        run: |
+          # nohup и отвязка от stdin: процесс должен пережить окончание шага
+          # и остаться работать для остальных проверок.
+          nohup node backend/src/index.js > backend.log 2>&1 < /dev/null &
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/health > /dev/null; then
+              echo "backend поднялся"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "backend не поднялся за 30 секунд"
+          cat backend.log
+          exit 1
+
+      - name: Полный сценарий из раздела 13 спецификации
+        run: ./scripts/e2e-test.sh
+
+      - name: Граничные случаи и права доступа
+        run: ./scripts/edge-cases-test.sh
+
+      - name: Слои Silver и Gold
+        working-directory: backend
+        run: node scripts/etl-test.mjs
+
+      - name: Доставка сообщений по WebSocket
+        working-directory: backend
+        run: node scripts/ws-test.mjs
+
+      - name: Лог backend при падении
+        if: failure()
+        run: cat backend.log
