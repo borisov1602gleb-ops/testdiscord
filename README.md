@@ -38,6 +38,24 @@ docker compose up --build
 
 Проверка: `curl http://localhost:3000/health`
 
+### Запуск на Windows одной командой
+
+```powershell
+.\start.ps1
+```
+
+`start.ps1` поднимает службу PostgreSQL, при первом запуске спрашивает пароль
+пользователя `postgres` и сохраняет настройки в `backend\.env` (файл не
+попадает в репозиторий), создаёт базу и применяет схему, если их ещё нет,
+ставит зависимости и запускает backend. Повторный запуск безопасен.
+
+Если PowerShell отказывается выполнять скрипт, нужно один раз разрешить
+запуск локальных скриптов:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
 ### Локальный запуск без Docker
 
 Пригодится, если образы Docker Hub недоступны.
