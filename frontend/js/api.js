@@ -8,6 +8,7 @@ const MESSAGES = {
   invalid_or_expired_code: 'Неверный или просроченный код',
   email_and_code_required: 'Введите почту и код',
   not_a_community_member: 'Вы не участник этого сообщества',
+  owner_only: 'Раздел доступен только владельцу сообщества',
   invite_not_found: 'Приглашение не найдено',
   invite_expired: 'Срок приглашения истёк',
   invite_exhausted: 'Приглашение исчерпано',

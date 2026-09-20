@@ -1762,3 +1762,210 @@ p {
     gap: var(--sp-2);
   }
 }
+
+/* ===== аналитика сообщества =====
+   Один акцентный цвет на все столбики: ряды сравниваются по длине, а не по
+   краске, поэтому разные оттенки только сбивали бы с толку. Подписи и цифры
+   остаются текстовыми цветами — цвет несёт величину, а не смысл слова. */
+
+.analytics {
+  max-width: 880px;
+}
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--sp-3);
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+
+.tile-label {
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  /* Место под две строки: иначе в соседних плитках цифры встают на разной
+     высоте и ряд читается хуже. */
+  min-height: 2.8em;
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.tile-value {
+  font-size: var(--fs-2xl);
+  line-height: var(--lh-tight);
+  font-weight: var(--fw-semibold);
+}
+
+.tile-note {
+  margin-top: auto;
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+/* Воронка: шаги идут сверху вниз, между ними — доля перехода. */
+.funnel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+
+.funnel-row {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr) 48px;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.funnel-label {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+}
+
+.funnel-track {
+  height: 14px;
+  border-radius: var(--r-sm);
+  background: rgba(233, 233, 237, 0.06);
+  overflow: hidden;
+}
+
+.funnel-bar {
+  height: 100%;
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  background: var(--accent);
+}
+
+.funnel-value {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  text-align: right;
+}
+
+.funnel-step {
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  padding-left: calc(190px + var(--sp-3));
+}
+
+/* Активность по дням: два показателя — два отдельных графика.
+   Совмещать их на одной оси нельзя: величины разного порядка. */
+.chart {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+
+.chart-title {
+  font-size: var(--fs-sm);
+  color: var(--text);
+}
+
+.chart-empty {
+  font-size: var(--fs-sm);
+  color: var(--text-faint);
+}
+
+.chart-axis {
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  line-height: 1.5;
+}
+
+.columns {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  align-items: end;
+  gap: var(--sp-2);
+  height: 140px;
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  height: 100%;
+  min-width: 0;
+}
+
+.column-track {
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  /* Полупрозрачная подложка = ось: видно, какую долю дня занимает столбик. */
+  background: rgba(233, 233, 237, 0.04);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+
+.column-bar {
+  width: 100%;
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+  background: var(--accent);
+}
+
+.column-label {
+  font-size: 10px;
+  color: var(--text-faint);
+  text-align: center;
+}
+
+@media (max-width: 720px) {
+  /* На узком экране боковое меню (и в настройках, и в аналитике) переезжает
+     наверх строкой: иначе колонка в 240px съедает половину ширины. */
+  .settings {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .settings-nav {
+    flex-direction: row;
+    align-items: center;
+    gap: var(--sp-2);
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .settings-nav .settings-kicker {
+    display: none;
+  }
+
+  .set-nav {
+    width: auto;
+    white-space: nowrap;
+  }
+
+  .settings-title {
+    font-size: var(--fs-lg);
+  }
+
+  .funnel-row {
+    grid-template-columns: minmax(0, 1fr) 44px;
+  }
+
+  .funnel-label {
+    grid-column: 1 / -1;
+  }
+
+  .funnel-step {
+    padding-left: 0;
+  }
+}

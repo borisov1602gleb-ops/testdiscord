@@ -22,7 +22,9 @@ export async function renderHome(communityId) {
   if (!communityId && communities.length > 0) return navigate(`#/c/${communities[0].id}`);
   if (communities.length === 0) return renderEmptyState();
 
-  const { community, channels } = await api(`/communities/${communityId}`);
+  // role приходит из того же запроса: по нему решаем, показывать ли владельцу
+  // вкладку аналитики. Сервер всё равно проверяет права сам.
+  const { community, channels, role } = await api(`/communities/${communityId}`);
   const textChannels = channels.filter((c) => c.type === 'text');
   const voiceChannels = channels.filter((c) => c.type === 'voice');
 
@@ -174,6 +176,19 @@ export async function renderHome(communityId) {
                 [icon('speaker'), el('span', { class: 'rail-name', text: channel.name })],
               ),
             ),
+            // Аналитика — только для владельца. Это подсказка интерфейса,
+            // а не защита: доступ всё равно проверяется на сервере.
+            role === 'owner' && el('div', { class: 'chan-group', text: 'Управление' }),
+            role === 'owner' &&
+              el(
+                'button',
+                {
+                  class: 'chan-item',
+                  type: 'button',
+                  onclick: () => navigate(`#/c/${community.id}/analytics`),
+                },
+                [icon('chart', 16), el('span', { class: 'rail-name', text: 'Аналитика' })],
+              ),
           ]),
           userZone(),
         ]),

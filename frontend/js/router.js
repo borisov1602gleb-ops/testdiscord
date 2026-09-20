@@ -6,12 +6,16 @@ import { renderHome, disconnectRealtime } from './views/home.js';
 import { renderInvite } from './views/invite.js';
 import { renderCall } from './views/call.js';
 import { renderSettings } from './views/settings.js';
+import { renderAnalytics } from './views/analytics.js';
 
 const routes = [
   { pattern: /^#\/login$/, open: true, view: () => renderLogin() },
   { pattern: /^#\/invite\/([\w-]+)$/, open: true, view: (id) => renderInvite(id) },
   { pattern: /^#\/call\/([\w-]+)$/, open: true, view: (id) => renderCall(id) },
   { pattern: /^#\/settings$/, view: () => renderSettings() },
+  // Аналитика объявлена раньше карточки сообщества: иначе более общий
+  // шаблон #/c/:id перехватил бы адрес.
+  { pattern: /^#\/c\/([\w-]+)\/analytics$/, view: (id) => renderAnalytics(id) },
   { pattern: /^#\/c\/([\w-]+)$/, view: (id) => renderHome(id) },
   { pattern: /^#\/?$/, view: () => renderHome(null) },
 ];
