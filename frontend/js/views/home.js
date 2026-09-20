@@ -304,7 +304,8 @@ function showCommunityModal() {
   input.focus();
 }
 
-function showInviteModal(communityId) {
+// Экспортируется: с экрана звонка тоже можно позвать людей по ссылке.
+export function showInviteModal(communityId) {
   const maxUses = el('input', {
     class: 'input',
     id: 'invite-uses',
