@@ -2,9 +2,11 @@
 -- Запускать так:  psql -U postgres -d community -f db\analytics.sql
 -- Либо копировать отдельные запросы и выполнять по одному.
 --
--- Важно: events_bronze — сырой слой (Bronze). Данные в нём не очищены:
--- возможны дубли и события разных сценариев вперемешку, поэтому цифры здесь
--- ориентировочные. Очищенные витрины (Silver/Gold) — следующий этап.
+-- Важно: events_bronze — сырой слой. Данные в нём не очищены: возможны
+-- дубли, битые поля и один и тот же человек под двумя идентификаторами,
+-- поэтому запросы 1–7 ниже дают ориентировочные цифры.
+-- Точные числа живут в витринах Gold (запросы 8–11 и экран аналитики):
+-- они собираются ETL по очищенному слою Silver — см. db/analytics-layers.sql.
 
 \echo '=== 1. Сколько событий каждого типа накопилось ==='
 SELECT event_type AS событие,
@@ -90,3 +92,44 @@ SELECT count(*) AS участий,
        max((payload->>'duration_sec')::int) AS максимум_сек
 FROM events_bronze
 WHERE event_type = 'call_participated';
+
+
+\echo ''
+\echo '=== 8. Состояние слоёв ==='
+SELECT
+  (SELECT count(*) FROM events_bronze)          AS bronze,
+  (SELECT count(*) FROM events_silver)          AS silver,
+  (SELECT count(*) FROM events_silver_rejected) AS в_карантине,
+  (SELECT last_run_at FROM etl_state WHERE layer = 'gold') AS витрины_собраны;
+
+\echo ''
+\echo '=== 9. Почему события не прошли очистку ==='
+-- Пусто — значит, лог пишется без мусора. Строки здесь означают, что
+-- какое-то место в коде кладёт в payload не то, что ожидается.
+SELECT reason AS причина, count(*) AS событий, max(received_at)::date AS последнее
+FROM events_silver_rejected
+GROUP BY reason
+ORDER BY событий DESC;
+
+\echo ''
+\echo '=== 10. Воронка приглашения по витрине (по людям, с учётом склейки) ==='
+SELECT c.name AS сообщество,
+       f.opened AS открыли,
+       f.joined_call AS зашли_в_звонок,
+       f.joined_community AS вступили,
+       f.registered AS из_них_зарегистрировались
+FROM gold_invite_funnel f
+JOIN communities c ON c.id = f.community_id
+ORDER BY f.opened DESC;
+
+\echo ''
+\echo '=== 11. Вовлечённость по неделям (WECU) ==='
+SELECT c.name AS сообщество,
+       w.week_start AS неделя,
+       w.engaged_people AS вовлечённых,
+       w.active_people AS активных,
+       w.messages AS сообщений,
+       w.call_seconds AS секунд_в_звонках
+FROM gold_community_weekly w
+JOIN communities c ON c.id = w.community_id
+ORDER BY w.week_start DESC, сообщество;

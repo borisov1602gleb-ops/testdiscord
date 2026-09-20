@@ -10,6 +10,7 @@ import { config } from './config.js';
 import { pool, waitForDatabase } from './db.js';
 import { errorHandler } from './lib/http.js';
 import { initRealtime } from './lib/realtime.js';
+import { ensureAnalyticsSchema, startEtlScheduler } from './etl/index.js';
 import { authRouter } from './routes/auth.js';
 import { usersRouter } from './routes/users.js';
 import { communitiesRouter } from './routes/communities.js';
@@ -57,8 +58,12 @@ const server = http.createServer(app);
 initRealtime(server);
 
 await waitForDatabase();
+// Таблицы слоёв Silver/Gold создаются при старте: DDL идемпотентный,
+// поэтому обновление кода не требует отдельной миграции.
+await ensureAnalyticsSchema();
 server.listen(config.port, () => {
   console.log(`[backend] listening on :${config.port}`);
+  startEtlScheduler();
 });
 
 for (const signal of ['SIGTERM', 'SIGINT']) {
