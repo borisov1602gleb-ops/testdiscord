@@ -775,36 +775,62 @@ p {
 /* ========= звонок ========= */
 
 .call {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
   height: 100%;
   background: var(--bg);
+}
+
+.call-stage {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: radial-gradient(110% 80% at 50% 0%, var(--accent-tint) 0%, transparent 62%), var(--bg);
 }
 
 .call-head {
   display: flex;
   align-items: center;
-  gap: var(--sp-4);
-  padding: var(--sp-4) var(--sp-5);
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
   border-bottom: 1px solid var(--line);
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
 }
 
-.call-titles {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin-right: auto;
-  min-width: 0;
+.call-head svg {
+  flex: none;
+  color: var(--accent-soft);
 }
 
 .call-channel {
-  font-size: var(--fs-lg);
+  font-size: var(--fs-sm);
   font-weight: var(--fw-medium);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.call-community {
-  font-size: var(--fs-xs);
-  color: var(--text-faint);
+.call-sep {
+  width: 5px;
+  height: 5px;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  flex: none;
+}
+
+.call-meta {
+  white-space: nowrap;
+}
+
+.call-quality {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  white-space: nowrap;
 }
 
 .status {
@@ -853,61 +879,196 @@ p {
   gap: var(--sp-4);
 }
 
-/* Колонки ограничены сверху: иначе единственный участник растянул бы
-   карточку во всю ширину экрана. */
-.members {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(150px, 220px));
-  justify-content: center;
-  gap: var(--sp-3);
+/* ===== демонстрация экрана ===== */
+
+/* Слот демонстрации — полноценный участник колонки: без этого поверхность
+   тянется по размеру видео и выдавливает плитки участников за экран. */
+.share-slot {
+  flex: 1;
+  min-height: 0;
+  display: flex;
 }
 
-.member {
+.share-slot:empty {
+  display: none;
+}
+
+.share-surface {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  border-radius: var(--r-md);
+  border: 1px solid var(--accent-deep);
+  background: linear-gradient(180deg, var(--bg-deep), var(--surface-2));
+  box-shadow: 0 0 44px -18px var(--accent);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.share-surface video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+
+.share-placeholder {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: var(--sp-2);
-  padding: var(--sp-5) var(--sp-3);
+  color: var(--text-faint);
+  font-size: var(--fs-sm);
+}
+
+.share-placeholder svg {
+  color: var(--accent-soft);
+}
+
+.share-badge {
+  position: absolute;
+  top: var(--sp-3);
+  left: var(--sp-3);
+  max-width: calc(100% - var(--sp-6));
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-xs);
+  color: #d9d2ff;
+  border: 1px solid var(--accent-deep);
+  /* Плашка ложится поверх произвольного кадра, поэтому фон непрозрачный. */
+  background: rgba(14, 16, 26, 0.82);
+  border-radius: var(--r-pill);
+  padding: 3px 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.share-badge .dot {
+  background: var(--accent);
+  width: 6px;
+  height: 6px;
+}
+
+/* ===== плитки участников ===== */
+
+.members {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--sp-4);
+  flex: 1;
+  min-height: 220px;
+  align-content: stretch;
+}
+
+/* Когда идёт демонстрация, плитки уезжают в узкую полосу под ней. */
+.call-body.is-sharing .members {
+  flex: none;
+  min-height: 0;
+  height: 120px;
+  gap: var(--sp-3);
+}
+
+.member {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-3);
   border-radius: var(--r-md);
   background: var(--surface);
-  border: 1px solid transparent;
+  border: 1px solid var(--line-strong);
+  overflow: hidden;
 }
 
 .member.is-speaking {
-  border-color: rgba(145, 132, 217, 0.45);
-  background: var(--accent-tint);
-  box-shadow: var(--accent-glow);
+  border-color: var(--accent);
+  background: radial-gradient(80% 80% at 50% 30%, var(--accent-tint-strong), var(--bg-deep));
+  box-shadow: 0 0 34px -14px var(--accent);
 }
 
 .member.is-muted {
-  opacity: 0.7;
+  opacity: 0.75;
+}
+
+.member video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #000;
+}
+
+/* Подпись поверх видео уходит вниз и получает фон: кадр под ней любой. */
+.member.has-video {
+  justify-content: flex-end;
+  padding: var(--sp-2);
+}
+
+.member.has-video .member-name,
+.member.has-video .member-state {
+  position: relative;
+  z-index: 1;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  background: rgba(14, 16, 26, 0.72);
+}
+
+.member.has-video .avatar,
+.member.has-video .bars {
+  display: none;
 }
 
 .avatar {
-  width: 56px;
-  height: 56px;
+  width: 72px;
+  height: 72px;
   border-radius: var(--r-pill);
   display: grid;
   place-items: center;
   background: var(--surface-3);
-  color: var(--text);
+  border: 1px solid var(--line-strong);
+  color: var(--text-muted);
   font-size: var(--fs-xl);
   font-weight: var(--fw-medium);
   text-transform: uppercase;
 }
 
+.call-body.is-sharing .avatar {
+  width: 40px;
+  height: 40px;
+  font-size: var(--fs-sm);
+}
+
 .member.is-speaking .avatar {
   background: var(--accent-deep);
+  border-color: var(--accent-soft);
   color: #efecff;
 }
 
 .member-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: var(--fs-sm);
-  font-weight: var(--fw-medium);
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.member-tag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: var(--r-pill);
+  background: var(--surface-3);
+  color: var(--text-muted);
+  text-transform: none;
 }
 
 .member-state {
@@ -915,17 +1076,221 @@ p {
   color: var(--text-faint);
 }
 
-.member.is-speaking .member-state {
+.member-mic {
+  position: absolute;
+  top: var(--sp-3);
+  right: var(--sp-3);
+  z-index: 1;
+  color: var(--text-faint);
+}
+
+.member.is-speaking .member-mic {
   color: var(--accent-soft);
 }
 
-.call-foot {
+/* Полоски-эквалайзер у говорящего: спокойнее, чем прыгающая рамка. */
+.bars {
   display: flex;
-  gap: var(--sp-2);
-  flex-wrap: wrap;
-  align-items: center;
-  padding: var(--sp-4) var(--sp-5);
+  align-items: flex-end;
+  gap: 3px;
+  height: 14px;
+}
+
+.bars span {
+  width: 3px;
+  height: 14px;
+  border-radius: 2px;
+  background: var(--accent);
+  transform: scaleY(0.35);
+}
+
+.member.is-speaking .bars span {
+  animation: bar-pulse 1.1s ease-in-out infinite;
+}
+
+.member.is-speaking .bars span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.member.is-speaking .bars span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+.member.is-speaking .bars span:nth-child(4) {
+  animation-delay: 0.45s;
+}
+
+@keyframes bar-pulse {
+  0%,
+  100% {
+    transform: scaleY(0.35);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .member.is-speaking .bars span {
+    animation: none;
+    transform: scaleY(0.7);
+  }
+}
+
+/* ===== панель управления ===== */
+
+.call-foot {
   border-top: 1px solid var(--line);
+  background: var(--bg-deep);
+  padding: var(--sp-4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.ctl {
+  width: 46px;
+  height: 46px;
+  border-radius: var(--r-pill);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  border: 1px solid var(--line-strong);
+  color: var(--text);
+  background: transparent;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.ctl:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent-soft);
+  background: var(--accent-tint);
+}
+
+.ctl.is-on {
+  border-color: var(--accent);
+  color: var(--accent-soft);
+  background: var(--accent-tint-strong);
+}
+
+.ctl.is-off {
+  border-color: var(--danger);
+  color: #ffb9c4;
+}
+
+.ctl:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.ctl-sep {
+  width: 1px;
+  height: 28px;
+  background: var(--line-strong);
+  margin: 0 var(--sp-2);
+}
+
+.hang {
+  width: 62px;
+  height: 46px;
+  border-radius: 23px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  border: 1px solid var(--danger);
+  color: #ffb9c4;
+  background: var(--danger-tint);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.hang:hover:not(:disabled) {
+  background: rgba(224, 115, 108, 0.34);
+  color: #ffe0e5;
+}
+
+.hang:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.call-hint {
+  flex-basis: 100%;
+  text-align: center;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+}
+
+/* ===== боковая панель звонка ===== */
+
+.call-side {
+  background: var(--bg-deep);
+  border-left: 1px solid var(--line);
+  padding: var(--sp-4) var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  overflow: auto;
+}
+
+.side-kicker {
+  font-size: var(--fs-xs);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.side-person {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+  padding: 6px var(--sp-2);
+  border-radius: var(--r-sm);
+  min-width: 0;
+}
+
+.side-person.is-speaking {
+  background: var(--accent-tint);
+  color: var(--text);
+}
+
+.side-person .rail-name {
+  flex: 1;
+}
+
+.side-dot {
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: var(--r-pill);
+  display: grid;
+  place-items: center;
+  background: var(--surface-3);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+}
+
+.side-person.is-speaking .side-dot {
+  background: var(--accent-deep);
+  color: #efecff;
+}
+
+.side-person svg {
+  flex: none;
+  color: var(--text-faint);
+}
+
+.side-person.is-speaking svg {
+  color: var(--accent-soft);
+}
+
+.side-note {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  line-height: 1.6;
 }
 
 .guest-note {
@@ -1049,5 +1414,35 @@ p {
 
   .invite-name {
     font-size: var(--fs-2xl);
+  }
+
+  /* Боковая панель звонка на телефоне мешает: показываем её по кнопке
+     «Участники», поверх сцены. */
+  .call {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .call-side {
+    display: none;
+  }
+
+  .call.show-side .call-side {
+    display: flex;
+    position: fixed;
+    inset: auto 0 0 0;
+    max-height: 60%;
+    border-left: none;
+    border-top: 1px solid var(--line-strong);
+    box-shadow: var(--shadow-lg);
+    z-index: 5;
+  }
+
+  .call-body {
+    padding: var(--sp-3);
+  }
+
+  .members {
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: var(--sp-2);
   }
 }
