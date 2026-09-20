@@ -1,6 +1,7 @@
-// Аналитика сообщества — видит только владелец. Одиночные показатели
-// показываем плитками, а не графиками: столбик из одного значения ничего
-// не добавляет к самому числу.
+// Аналитика сообщества — видит только владелец. Цифры приходят из витрин
+// слоя Gold: страница ничего не считает сама, она только показывает.
+// Одиночные показатели показываем плитками, а не графиками: столбик из
+// одного значения ничего не добавляет к самому числу.
 import { api } from '../api.js';
 import { el, mount } from '../dom.js';
 import { navigate } from '../router.js';
@@ -48,9 +49,18 @@ export async function renderAnalytics(communityId) {
     return minutes > 0 ? `${minutes} мин ${seconds % 60} сек` : `${seconds} сек`;
   };
 
+  const formatMoment = (iso) => {
+    if (!iso) return 'ещё не считалась';
+    const date = new Date(iso);
+    const sameDay = date.toDateString() === new Date().toDateString();
+    const time = date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    return sameDay ? `сегодня в ${time}` : `${date.toLocaleDateString('ru-RU')}, ${time}`;
+  };
+
   // ===== воронка =====
-  // Шаги упорядочены, поэтому это столбики одного цвета, а не разные краски
-  // на каждый шаг: длина полосы уже несёт величину.
+  // Шаги вложенные: каждый следующий считается только среди прошедших
+  // предыдущий. Столбики одного цвета — величину несёт длина полосы,
+  // а не краска.
   const funnelSteps = [
     { label: 'Открыли приглашение', value: data.funnel.opened },
     { label: 'Зашли в звонок', value: data.funnel.joined_call },
@@ -124,6 +134,32 @@ export async function renderAnalytics(communityId) {
   const retentionPercent = percent(data.retention.returned, data.retention.eligible);
   const errorPercent = percent(data.errors.failed, data.errors.total);
 
+  // Пересчёт по кнопке: ждать расписания, чтобы увидеть в статистике
+  // только что отправленное сообщение, неудобно.
+  const refreshButton = el('button', {
+    class: 'btn btn-secondary btn-sm',
+    type: 'button',
+    text: 'Пересчитать',
+    onclick: async () => {
+      refreshButton.disabled = true;
+      refreshButton.textContent = 'Считаем…';
+      try {
+        await api(`/communities/${communityId}/analytics/refresh`, { method: 'POST', body: {} });
+      } finally {
+        renderAnalytics(communityId);
+      }
+    },
+  });
+
+  const freshness = data.freshness ?? {};
+  const freshnessNote = [
+    `Данные на ${formatMoment(freshness.last_run_at)}`,
+    freshness.pending_rows ? `в очереди событий: ${freshness.pending_rows}` : null,
+    freshness.rejected_rows ? `отклонено при очистке: ${freshness.rejected_rows}` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
   mount(
     el('div', { class: 'settings' }, [
       el('nav', { class: 'settings-nav' }, [
@@ -140,12 +176,15 @@ export async function renderAnalytics(communityId) {
       el('div', { class: 'settings-pane' }, [
         el('header', { class: 'settings-head' }, [
           el('h1', { class: 'settings-title', text: `Аналитика — ${community.name}` }),
+          refreshButton,
         ]),
 
         el('div', { class: 'settings-body analytics' }, [
+          el('p', { class: 'chart-axis', text: freshnessNote }),
+
           el('div', { class: 'tiles' }, [
             tile(
-              'Вовлечены за неделю',
+              'Вовлечены на этой неделе',
               String(data.wecu.engaged),
               `из ${data.wecu.active} активных · порог: ${data.wecu.thresholds.messages} сообщений или ${data.wecu.thresholds.seconds / 60} мин в звонке`,
             ),
@@ -177,7 +216,10 @@ export async function renderAnalytics(communityId) {
             funnelChart,
             el('p', {
               class: 'chart-axis',
-              text: 'Считается по уникальным людям: у гостя — временный идентификатор, у зарегистрированного — его учётная запись.',
+              text:
+                `Считается по людям: гость и он же после регистрации — один человек. ` +
+                `Из открывших ссылку зарегистрировались: ${data.funnel.registered}. ` +
+                `Всего вступивших, включая пришедших мимо ссылки: ${data.funnel.joined_total}.`,
             }),
           ]),
 
@@ -197,10 +239,25 @@ export async function renderAnalytics(communityId) {
             ]),
           ]),
 
-          el('p', {
-            class: 'chart-axis',
-            text: 'Цифры считаются по сырому событийному логу без очистки, поэтому на малых данных возможны перекосы. Точные витрины появятся вместе со слоями Silver и Gold.',
-          }),
+          el('section', { class: 'settings-section' }, [
+            el('p', { class: 'settings-kicker', text: 'Как это считается' }),
+            el('p', {
+              class: 'chart-axis',
+              text:
+                'Сырой лог (Bronze) очищается в слой Silver: разбираются типы, ' +
+                'отбрасываются дубли, гость склеивается с пользователем. Из него ' +
+                'собираются витрины (Gold), которые и показаны выше. События, не ' +
+                'прошедшие проверку, не теряются — они лежат отдельно с причиной.',
+            }),
+            el('p', {
+              class: 'chart-axis',
+              text:
+                'Что стоит помнить: минуты гостей в звонках не учитываются — ' +
+                'событие участия пишется только для зарегистрированных; владелец не ' +
+                'входит в активацию и возврат, потому что он не вступал; границы ' +
+                'суток — по времени сервера.',
+            }),
+          ]),
         ]),
       ]),
     ]),
