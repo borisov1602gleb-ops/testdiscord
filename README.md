@@ -2,9 +2,11 @@
 
 [![Тесты](https://github.com/borisov1602gleb-ops/testdiscord/actions/workflows/tests.yml/badge.svg)](https://github.com/borisov1602gleb-ops/testdiscord/actions/workflows/tests.yml)
 
-Исходная спецификация продукта лежит рядом — [docs/PROJECT_FULL_SPEC.md](docs/PROJECT_FULL_SPEC.md):
-продукт, метрики, архитектура данных, схема БД и критерий готовности. Всё, что
-ниже, — реализация по ней.
+Два документа рядом: [docs/PROJECT_FULL_SPEC.md](docs/PROJECT_FULL_SPEC.md) —
+исходная спецификация продукта, по которой всё написано;
+[docs/PROJECT_STATE.md](docs/PROJECT_STATE.md) — полное описание состояния
+проекта: что сделано, как устроено внутри, что проверено, какие есть
+ограничения и куда двигаться дальше. Здесь, в README, — короткая инструкция.
 
 Веб-клиент, backend и инфраструктура MVP по спецификации проекта: сообщества с
 текстовыми и голосовыми каналами, вход по коду на email, подключение к звонку по
@@ -250,7 +252,7 @@ PGHOST=localhost PGUSER=postgres PGPASSWORD=postgres ./scripts/e2e-test.sh
 cd backend && node scripts/ws-test.mjs
 ```
 
-Граничные случаи и правила доступа — 24 проверки: кто куда не должен
+Граничные случаи и правила доступа — 22 проверки: кто куда не должен
 попадать, что происходит с исчерпанным приглашением, чужим участием
 в звонке, слишком длинным сообщением, битым JSON и перебором кода входа:
 
