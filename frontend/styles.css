@@ -953,6 +953,26 @@ p {
   height: 6px;
 }
 
+.share-expand {
+  position: absolute;
+  top: var(--sp-3);
+  right: var(--sp-3);
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--r-md);
+  border: 1px solid var(--line-strong);
+  background: rgba(14, 16, 26, 0.82);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.share-expand:hover {
+  border-color: var(--accent);
+  color: var(--accent-soft);
+}
+
 /* ===== плитки участников ===== */
 
 .members {
@@ -964,12 +984,21 @@ p {
   align-content: stretch;
 }
 
-/* Когда идёт демонстрация, плитки уезжают в узкую полосу под ней. */
+/* Когда идёт демонстрация, плитки уезжают в полосу под ней. Полоса
+   прокручивается вбок, а плитки держат ширину — иначе при демонстрации
+   с включёнными камерами лица сжимаются до нечитаемого. */
 .call-body.is-sharing .members {
   flex: none;
   min-height: 0;
-  height: 120px;
+  height: 156px;
   gap: var(--sp-3);
+  grid-template-columns: none;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(180px, 220px);
+  justify-content: start;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: var(--sp-1);
 }
 
 .member {
