@@ -7,6 +7,7 @@ import { store } from '../store.js';
 import { el, mount, icon, initial } from '../dom.js';
 import { navigate } from '../router.js';
 import { showInviteModal } from './home.js';
+import { settings, playChime } from '../settings.js';
 
 const STATUS_TEXT = {
   connecting: 'Подключаемся…',
@@ -53,7 +54,7 @@ export async function renderCall(callId) {
 
   // В звонке место ограничено, поэтому от почты показываем часть до собаки.
   const shortName = (value) => (value ?? '').split('@')[0] || 'Гость';
-  const selfName = shortName(store.user?.email) || 'Гость';
+  const selfName = store.user?.display_name || shortName(store.user?.email) || 'Гость';
   const startedAt = Date.now();
 
   let room = null;
@@ -61,7 +62,10 @@ export async function renderCall(callId) {
   let status = 'connecting';
   let statusDetail = '';
   let quality = 'unknown';
-  let muted = false;
+  // Настройки применяются при входе: выбранные устройства и «входить
+  // с выключенным микрофоном».
+  const prefs = settings.all;
+  let muted = prefs.joinMuted;
   let cameraOn = false;
   let sharing = false;
   let micAvailable = true;
@@ -79,6 +83,8 @@ export async function renderCall(callId) {
       livekit = await import('/vendor/livekit-client.esm.mjs');
       const { Room, RoomEvent } = livekit;
       room = new Room();
+
+      room.on(RoomEvent.ParticipantConnected, () => playChime('join'));
 
       for (const event of [
         RoomEvent.ParticipantConnected,
@@ -107,6 +113,10 @@ export async function renderCall(callId) {
         if (track.kind === 'audio') {
           const audio = track.attach();
           audio.autoplay = true;
+          // Выбранные динамики, если браузер это умеет (Chrome, Edge).
+          if (prefs.speakerDeviceId && audio.setSinkId) {
+            audio.setSinkId(prefs.speakerDeviceId).catch(() => {});
+          }
           audioSink.append(audio);
         }
         sync();
@@ -128,7 +138,7 @@ export async function renderCall(callId) {
       status = 'connected';
 
       try {
-        await room.localParticipant.setMicrophoneEnabled(true);
+        await room.localParticipant.setMicrophoneEnabled(!muted, deviceOption('micDeviceId'));
       } catch {
         micAvailable = false;
         statusDetail = 'Микрофон недоступен — вы слышите других, но говорить не можете';
@@ -142,6 +152,13 @@ export async function renderCall(callId) {
       statusDetail = 'Не удалось подключиться к серверу звонков';
       draw();
     }
+  }
+
+  // LiveKit принимает ограничения захвата: так выбранный микрофон или камера
+  // используются вместо системных по умолчанию.
+  function deviceOption(key) {
+    const id = prefs[key];
+    return id ? { deviceId: id } : undefined;
   }
 
   function micPublication(participant) {
@@ -219,13 +236,17 @@ export async function renderCall(callId) {
     muted = !muted;
     // Интерфейс реагирует сразу, не дожидаясь ответа SDK.
     draw();
-    return withControl('mic', () => room?.localParticipant.setMicrophoneEnabled(!muted));
+    return withControl('mic', () =>
+      room?.localParticipant.setMicrophoneEnabled(!muted, deviceOption('micDeviceId')),
+    );
   }
 
   function toggleCamera() {
     cameraOn = !cameraOn;
     draw();
-    return withControl('camera', () => room?.localParticipant.setCameraEnabled(cameraOn));
+    return withControl('camera', () =>
+      room?.localParticipant.setCameraEnabled(cameraOn, deviceOption('cameraDeviceId')),
+    );
   }
 
   function toggleShare() {
