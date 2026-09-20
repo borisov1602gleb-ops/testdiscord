@@ -118,10 +118,27 @@ const rejectedIds = {
     channel_id: textChannelId,
     timestamp: 'вчера вечером',
   }),
+  // Раздел 6.2: join_status — перечисление, а community_id обязан
+  // существовать в справочнике.
+  badEnum: await bronze('call_joined', {
+    call_id: callId,
+    anonymous_id: `enum-${stamp}`,
+    join_status: 'наверное получилось',
+  }),
+  unknownRef: await bronze('message_sent', {
+    user_id: ownerId,
+    community_id: '22222222-2222-2222-2222-222222222222',
+  }),
 };
 
-const first = await runEtl();
-check('первый прогон загрузил события', first.silver.loaded >= 5, true);
+await runEtl();
+// Считаем именно свои события: в базе параллельно живут чужие, и общий
+// счётчик прогона ничего бы не доказывал.
+const { rows: loadedRows } = await pool.query(
+  'SELECT count(*)::int AS n FROM events_silver WHERE event_id = ANY($1)',
+  [eventIds],
+);
+check('первый прогон загрузил годные события', loadedRows[0].n, 3);
 
 const { rows: guestRows } = await pool.query(
   `SELECT DISTINCT person_id FROM events_silver WHERE anonymous_id = $1`,
@@ -202,6 +219,8 @@ check('битый uuid', byId[rejectedIds.badUuid], 'bad_uuid');
 check('событие без человека', byId[rejectedIds.noPerson], 'no_person');
 check('отрицательная длительность', byId[rejectedIds.badDuration], 'bad_duration');
 check('нечитаемое время', byId[rejectedIds.badTimestamp], 'bad_timestamp');
+check('join_status вне перечисления', byId[rejectedIds.badEnum], 'bad_enum');
+check('ссылка на несуществующее сообщество', byId[rejectedIds.unknownRef], 'unknown_reference');
 
 const { rows: leaked } = await pool.query(
   `SELECT count(*)::int AS n FROM events_silver WHERE event_id = ANY($1)`,
