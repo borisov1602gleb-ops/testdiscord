@@ -4,19 +4,27 @@
 // иначе время в базе осталось бы несосчитанным.
 import { api } from '../api.js';
 import { store } from '../store.js';
-import { el, mount } from '../dom.js';
+import { el, mount, icon, initial } from '../dom.js';
 import { navigate } from '../router.js';
 
 export async function renderCall(callId) {
   const active = store.activeCall;
   if (!active || active.callId !== callId) {
     return mount(
-      el('div', { class: 'centered' }, [
-        el('div', { class: 'card' }, [
-          el('h1', { text: 'Звонок недоступен' }),
-          el('p', { class: 'subtitle', text: 'Подключитесь к звонку заново из канала или по приглашению' }),
-          el('div', { class: 'actions' }, [
-            el('button', { text: 'На главную', onclick: () => navigate('#/') }),
+      el('div', { class: 'summary' }, [
+        el('div', { class: 'summary-card' }, [
+          el('h1', { class: 'summary-title', text: 'Звонок недоступен' }),
+          el('p', {
+            class: 'summary-time',
+            text: 'Подключитесь к звонку заново из канала или по приглашению',
+          }),
+          el('div', { class: 'invite-actions' }, [
+            el('button', {
+              class: 'btn btn-primary btn-block',
+              type: 'button',
+              text: 'На главную',
+              onclick: () => navigate('#/'),
+            }),
           ]),
         ]),
       ]),
@@ -35,7 +43,14 @@ export async function renderCall(callId) {
   let muted = false;
   let micAvailable = true;
   let leaving = false;
-  let participants = [{ identity: active.identity, local: true, speaking: false }];
+  // Имя в звонке: почта у зарегистрированного, «Гость» у пришедшего по ссылке.
+  // Идентификатор — это UUID, показывать его человеку бессмысленно.
+  const displayName = (name, identity) =>
+    !name || name === 'guest' ? (identity === active.identity ? 'Вы' : 'Гость') : name;
+
+  let participants = [
+    { name: store.user?.email ?? 'Гость', local: true, speaking: false },
+  ];
 
   async function connect() {
     try {
@@ -81,7 +96,7 @@ export async function renderCall(callId) {
       // в БД, поэтому корректный выход из звонка обязан работать и здесь.
       console.error('livekit:', err);
       status = 'failed';
-      statusDetail = 'Не удалось подключиться к серверу звонков. Остальное работает — можно выйти и попробовать снова';
+      statusDetail = 'Не удалось подключиться к серверу звонков';
       draw();
     }
   }
@@ -90,7 +105,7 @@ export async function renderCall(callId) {
     const local = room?.localParticipant;
     participants = [
       {
-        identity: local?.identity ?? active.identity,
+        name: store.user?.email ?? 'Гость',
         local: true,
         speaking: Boolean(local?.isSpeaking),
         muted,
@@ -102,7 +117,7 @@ export async function renderCall(callId) {
           ? p.getTrackPublication(livekit.Track.Source.Microphone)
           : null;
         return {
-          identity: p.identity,
+          name: displayName(p.name, p.identity),
           local: false,
           speaking: p.isSpeaking,
           muted: !micPublication || micPublication.isMuted,
@@ -151,24 +166,24 @@ export async function renderCall(callId) {
   function showSummary(durationSec, error) {
     const guestInvite = active.guest ? active.inviteId : null;
     mount(
-      el('div', { class: 'centered' }, [
-        el('div', { class: 'card' }, [
-          el('h1', { text: 'Звонок завершён' }),
+      el('div', { class: 'summary' }, [
+        el('div', { class: 'summary-card' }, [
+          el('h1', { class: 'summary-title', text: 'Звонок завершён' }),
           el('p', {
-            class: 'subtitle',
+            class: 'summary-time',
             text:
-              durationSec != null
-                ? `Вы были в звонке ${formatDuration(durationSec)}`
-                : (error ?? ''),
+              durationSec != null ? `Вы были в звонке ${formatDuration(durationSec)}` : (error ?? ''),
           }),
           guestInvite &&
-            el('div', {
-              class: 'banner',
+            el('p', {
+              class: 'promo',
               text: 'Зарегистрируйтесь, чтобы остаться в сообществе и писать в чат',
             }),
-          el('div', { class: 'actions' }, [
+          el('div', { class: 'invite-actions' }, [
             guestInvite
               ? el('button', {
+                  class: 'btn btn-primary btn-lg btn-block',
+                  type: 'button',
                   text: 'Зарегистрироваться',
                   onclick: () => {
                     store.pendingInvite = guestInvite;
@@ -176,12 +191,15 @@ export async function renderCall(callId) {
                   },
                 })
               : el('button', {
+                  class: 'btn btn-primary btn-lg btn-block',
+                  type: 'button',
                   text: 'Вернуться к каналам',
                   onclick: () => navigate(active.communityId ? `#/c/${active.communityId}` : '#/'),
                 }),
             guestInvite &&
               el('button', {
-                class: 'secondary',
+                class: 'btn btn-secondary btn-block',
+                type: 'button',
                 text: 'Вернуться к приглашению',
                 onclick: () => navigate(`#/invite/${guestInvite}`),
               }),
@@ -200,49 +218,64 @@ export async function renderCall(callId) {
   // Узлы создаются один раз: участники в звонке обновляются часто, и полная
   // перерисовка теряла бы нажатия по кнопкам, попавшие в момент замены DOM.
   const statusLabel = document.createTextNode('');
-  const statusNode = el('p', { class: 'call-status' }, [el('span', { class: 'dot' }), statusLabel]);
-  const bannerNode = el('div', { class: 'banner warning' });
-  const participantsNode = el('div', { class: 'participants' });
-  const muteButton = el('button', { class: 'secondary', onclick: toggleMute });
-  const leaveButton = el('button', { class: 'danger', onclick: leave });
+  const statusNode = el('span', { class: 'status' }, [el('span', { class: 'dot' }), statusLabel]);
+  const bannerNode = el('div', { class: 'banner' }, [icon('alert'), document.createTextNode('')]);
+  const membersNode = el('div', { class: 'members' });
+  const muteButton = el('button', { class: 'btn btn-secondary', type: 'button', onclick: toggleMute });
+  const leaveButton = el('button', { class: 'btn btn-danger', type: 'button', onclick: leave });
 
-  const screen = el('div', { class: 'call' }, [
-    el('div', {}, [
-      el('h1', { text: active.channelName ?? 'Звонок' }),
-      active.communityName && el('p', { class: 'subtitle', text: active.communityName }),
-    ]),
-    statusNode,
-    bannerNode,
-    participantsNode,
-    el('div', { class: 'call-controls' }, [muteButton, leaveButton]),
+  const body = el('div', { class: 'call-body' }, [
+    membersNode,
     active.guest &&
       el('p', {
-        class: 'hint',
+        class: 'guest-note',
         text: 'Вы в звонке как гость — после выхода можно зарегистрироваться и остаться в сообществе',
       }),
   ]);
 
+  const screen = el('div', { class: 'call' }, [
+    el('header', { class: 'call-head' }, [
+      el('div', { class: 'call-titles' }, [
+        el('span', { class: 'call-channel', text: active.channelName ?? 'Звонок' }),
+        active.communityName && el('span', { class: 'call-community', text: active.communityName }),
+      ]),
+      statusNode,
+    ]),
+    body,
+    el('footer', { class: 'call-foot' }, [muteButton, leaveButton]),
+  ]);
+
   function draw() {
-    statusNode.className = `call-status ${status}`;
+    statusNode.className = `status ${status}`;
     statusLabel.nodeValue = {
       connecting: 'Подключаемся…',
       connected: 'В звонке',
       failed: 'Нет связи',
     }[status];
 
-    bannerNode.textContent = statusDetail;
-    bannerNode.hidden = !statusDetail;
+    if (statusDetail) {
+      bannerNode.lastChild.nodeValue = statusDetail;
+      if (!bannerNode.isConnected) body.prepend(bannerNode);
+    } else {
+      bannerNode.remove();
+    }
 
-    participantsNode.replaceChildren(
+    membersNode.replaceChildren(
       ...participants.map((p) =>
-        el('div', { class: `participant${p.speaking ? ' speaking' : ''}` }, [
-          el('div', { class: 'avatar', text: (p.identity ?? '?').slice(0, 1) }),
-          el('div', { class: 'participant-name', text: p.local ? 'Вы' : p.identity }),
-          el('div', {
-            class: 'participant-state',
-            text: p.muted ? 'микрофон выключен' : p.speaking ? 'говорит' : 'слушает',
-          }),
-        ]),
+        el(
+          'div',
+          {
+            class: `member${p.speaking ? ' is-speaking' : ''}${p.muted ? ' is-muted' : ''}`,
+          },
+          [
+            el('div', { class: 'avatar', text: initial(p.name) }),
+            el('span', { class: 'member-name', text: p.local ? 'Вы' : p.name }),
+            el('span', {
+              class: 'member-state',
+              text: p.muted ? 'микрофон выключен' : p.speaking ? 'говорит' : 'слушает',
+            }),
+          ],
+        ),
       ),
     );
 
