@@ -10,6 +10,7 @@ import { optionalAuth } from '../middleware/auth.js';
 import { requireMembership, getChannel } from '../lib/access.js';
 import { parseUuid } from '../lib/validate.js';
 import { createCallToken } from '../lib/livekit.js';
+import { getProfile } from '../lib/users.js';
 import { config } from '../config.js';
 
 export const callsRouter = Router();
@@ -138,11 +139,13 @@ callsRouter.post(
           )
         ).rows;
 
+    // В комнату уходит имя из профиля: по нему собеседники подписывают плитки.
     const identity = req.user?.id ?? anonymousId;
+    const profile = req.user ? await getProfile(req.user.id) : null;
     const livekitToken = await createCallToken({
       roomName: callId,
       identity,
-      name: req.user?.email ?? 'guest',
+      name: profile?.public_name ?? 'guest',
     });
 
     await logJoin('success', call.community_id);

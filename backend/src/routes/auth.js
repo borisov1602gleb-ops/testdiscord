@@ -10,6 +10,7 @@ import { logEvent, EVENT_TYPES } from '../lib/events.js';
 import { sendLoginCode } from '../lib/mailer.js';
 import { signToken } from '../middleware/auth.js';
 import { config } from '../config.js';
+import { getProfile } from '../lib/users.js';
 
 export const authRouter = Router();
 
@@ -126,7 +127,7 @@ authRouter.post(
 
     res.json({
       token: signToken(result.user),
-      user: result.user,
+      user: await getProfile(result.user.id),
       is_new_user: result.isNewUser,
       linked_call_participants: result.linkedParticipants,
     });

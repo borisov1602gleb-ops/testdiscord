@@ -3,6 +3,7 @@
 import { api } from '../api.js';
 import { store } from '../store.js';
 import { el, mount, formatTime, icon, initial } from '../dom.js';
+import { playChime } from '../settings.js';
 import { navigate } from '../router.js';
 
 let socket = null;
@@ -34,8 +35,7 @@ export async function renderHome(communityId) {
     seenMessageIds.add(message.id);
     feedNode.querySelector('.empty-quiet')?.remove();
 
-    const author =
-      message.author_email ?? (message.user_id === store.user?.id ? store.user.email : '');
+    const author = message.author_name ?? '';
     feedNode.append(
       el('article', { class: 'msg' }, [
         el('div', { class: 'msg-avatar', text: initial(author) }),
@@ -70,7 +70,10 @@ export async function renderHome(communityId) {
     socket = io({ auth: { token: store.token } });
     socket.on('connect', () => socket.emit('join_channel', channelId));
     socket.on('message', (message) => {
-      if (message.channel_id === channelId) appendMessage(message);
+      if (message.channel_id !== channelId) return;
+      appendMessage(message);
+      // Своё же сообщение возвращается тем же каналом — на него не звеним.
+      if (message.user_id !== store.user?.id && document.hidden) playChime('message');
     });
   }
 
@@ -172,18 +175,7 @@ export async function renderHome(communityId) {
               ),
             ),
           ]),
-          el('div', { class: 'pane-foot' }, [
-            el('div', { class: 'user-line' }, [el('span', { text: store.user?.email ?? '' })]),
-            el('button', {
-              class: 'btn btn-secondary btn-sm',
-              type: 'button',
-              text: 'Выйти',
-              onclick: () => {
-                store.clearSession();
-                navigate('#/login');
-              },
-            }),
-          ]),
+          userZone(),
         ]),
 
         el('main', { class: 'chat' }, [
@@ -220,6 +212,75 @@ export async function renderHome(communityId) {
 
   if (activeChannel) await openTextChannel(activeChannel);
   else draw();
+}
+
+// Плашка профиля внизу колонки каналов: имя, статус и меню с настройками
+// и выходом. Меню открывается вверх, чтобы не упираться в край экрана.
+function userZone() {
+  const name = store.user?.display_name || store.user?.email || '';
+  const zone = el('div', { class: 'user-zone' });
+
+  const menu = el('div', { class: 'user-menu' }, [
+    el('div', { class: 'user-menu-head' }, [
+      el('div', { class: 'user-avatar', text: initial(name) }),
+      el('div', { class: 'user-texts' }, [
+        el('span', { class: 'user-name', text: name }),
+        el('span', { class: 'user-menu-mail', text: store.user?.email ?? '' }),
+      ]),
+    ]),
+    el('button', { class: 'menu-item', type: 'button', onclick: () => navigate('#/settings') }, [
+      icon('gear', 16),
+      'Настройки',
+    ]),
+    el('button', { class: 'menu-item', type: 'button', onclick: () => navigate('#/settings') }, [
+      icon('profile', 16),
+      'Профиль',
+    ]),
+    el(
+      'button',
+      {
+        class: 'menu-item menu-danger',
+        type: 'button',
+        onclick: () => {
+          store.clearSession();
+          navigate('#/login');
+        },
+      },
+      [icon('signOut', 16), 'Выйти из аккаунта'],
+    ),
+  ]);
+
+  const caret = el('span', { class: 'caret' }, [icon('caretUp', 14)]);
+
+  function toggle(open) {
+    const shouldOpen = open ?? !menu.isConnected;
+    if (shouldOpen) {
+      zone.prepend(menu);
+      caret.replaceChildren(icon('caretDown', 14));
+      setTimeout(() => document.addEventListener('click', onOutside), 0);
+    } else {
+      menu.remove();
+      caret.replaceChildren(icon('caretUp', 14));
+      document.removeEventListener('click', onOutside);
+    }
+  }
+
+  function onOutside(event) {
+    if (!zone.contains(event.target)) toggle(false);
+  }
+
+  zone.append(
+    el('button', { class: 'user-bar', type: 'button', onclick: () => toggle() }, [
+      el('div', { class: 'user-avatar', text: initial(name) }),
+      el('div', { class: 'user-texts' }, [
+        el('span', { class: 'user-name', text: name }),
+        el('span', { class: 'user-status', text: 'В сети' }),
+      ]),
+      caret,
+    ]),
+  );
+
+  return zone;
 }
 
 function renderEmptyState() {

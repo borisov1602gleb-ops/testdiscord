@@ -11,6 +11,7 @@ import { pool, waitForDatabase } from './db.js';
 import { errorHandler } from './lib/http.js';
 import { initRealtime } from './lib/realtime.js';
 import { authRouter } from './routes/auth.js';
+import { usersRouter } from './routes/users.js';
 import { communitiesRouter } from './routes/communities.js';
 import { invitesRouter } from './routes/invites.js';
 import { callsRouter } from './routes/calls.js';
@@ -41,6 +42,7 @@ app.use(
 app.use(express.static(path.join(srcDir, '..', '..', 'frontend')));
 
 app.use('/auth', authRouter);
+app.use('/users', usersRouter);
 app.use('/communities', communitiesRouter);
 app.use('/invites', invitesRouter);
 app.use('/calls', callsRouter);

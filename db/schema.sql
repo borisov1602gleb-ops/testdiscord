@@ -7,6 +7,10 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE TABLE users (
   id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   email               TEXT NOT NULL UNIQUE,
+  -- Имя для показа другим участникам. Пока не задано, показывается почта;
+  -- hide_email скрывает её от всех, кроме самого пользователя.
+  display_name        TEXT,
+  hide_email          BOOLEAN NOT NULL DEFAULT false,
   registration_source TEXT,
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );

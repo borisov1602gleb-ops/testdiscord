@@ -5,11 +5,13 @@ import { renderLogin } from './views/login.js';
 import { renderHome, disconnectRealtime } from './views/home.js';
 import { renderInvite } from './views/invite.js';
 import { renderCall } from './views/call.js';
+import { renderSettings } from './views/settings.js';
 
 const routes = [
   { pattern: /^#\/login$/, open: true, view: () => renderLogin() },
   { pattern: /^#\/invite\/([\w-]+)$/, open: true, view: (id) => renderInvite(id) },
   { pattern: /^#\/call\/([\w-]+)$/, open: true, view: (id) => renderCall(id) },
+  { pattern: /^#\/settings$/, view: () => renderSettings() },
   { pattern: /^#\/c\/([\w-]+)$/, view: (id) => renderHome(id) },
   { pattern: /^#\/?$/, view: () => renderHome(null) },
 ];
