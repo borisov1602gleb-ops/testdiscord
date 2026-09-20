@@ -13,6 +13,7 @@ import { initRealtime } from './lib/realtime.js';
 import { authRouter } from './routes/auth.js';
 import { usersRouter } from './routes/users.js';
 import { communitiesRouter } from './routes/communities.js';
+import { analyticsRouter } from './routes/analytics.js';
 import { invitesRouter } from './routes/invites.js';
 import { callsRouter } from './routes/calls.js';
 import { messagesRouter } from './routes/messages.js';
@@ -43,6 +44,7 @@ app.use(express.static(path.join(srcDir, '..', '..', 'frontend')));
 
 app.use('/auth', authRouter);
 app.use('/users', usersRouter);
+app.use('/communities', analyticsRouter);
 app.use('/communities', communitiesRouter);
 app.use('/invites', invitesRouter);
 app.use('/calls', callsRouter);
