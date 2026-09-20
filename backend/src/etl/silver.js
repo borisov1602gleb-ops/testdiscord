@@ -32,6 +32,9 @@ const KNOWN_TYPES = [
 const MAX_DURATION_SEC = 86400;
 const MAX_CLOCK_SKEW_HOURS = 24;
 
+// Допустимые значения join_status (раздел 6.2 спецификации).
+const JOIN_STATUSES = ['success', 'failed'];
+
 export async function refreshIdentityMap(client) {
   // Два источника склейки: событие регистрации, где гость назвал свой
   // anonymous_id, и записи участия в звонке, привязанные к user_id при
@@ -110,6 +113,19 @@ export async function loadSilver(client) {
             OR (s.raw_message_id   IS NOT NULL AND s.message_id   IS NULL)
             THEN 'bad_uuid'
           WHEN s.user_id IS NULL AND s.anonymous_id IS NULL THEN 'no_person'
+          -- Раздел 6.2 спецификации: join_status — перечисление, а не
+          -- произвольная строка.
+          WHEN s.event_type = 'call_joined'
+           AND (s.join_status IS NULL OR s.join_status <> ALL ($4::text[]))
+            THEN 'bad_enum'
+          -- Там же: invite_id и community_id обязаны существовать в
+          -- справочниках, иначе в витрине появятся ссылки в пустоту.
+          WHEN s.community_id IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM communities c WHERE c.id = s.community_id)
+            THEN 'unknown_reference'
+          WHEN s.invite_id IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM invites i WHERE i.id = s.invite_id)
+            THEN 'unknown_reference'
           WHEN s.raw_duration IS NOT NULL
            AND (s.duration_sec IS NULL OR s.duration_sec < 0 OR s.duration_sec > $2::int)
             THEN 'bad_duration'
@@ -170,7 +186,7 @@ export async function loadSilver(client) {
       (SELECT count(*) FROM rejected) AS rejected,
       (SELECT count(*) FROM checked)  AS seen
     `,
-    [KNOWN_TYPES, MAX_DURATION_SEC, MAX_CLOCK_SKEW_HOURS],
+    [KNOWN_TYPES, MAX_DURATION_SEC, MAX_CLOCK_SKEW_HOURS, JOIN_STATUSES],
   );
 
   // Ретроспективная склейка: гость мог зарегистрироваться после того, как
