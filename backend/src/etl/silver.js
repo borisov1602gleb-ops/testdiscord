@@ -52,7 +52,11 @@ export async function refreshIdentityMap(client) {
       FROM call_participants
       WHERE anonymous_id IS NOT NULL AND user_id IS NOT NULL
     ) candidates
-    WHERE anonymous_id IS NOT NULL AND user_id IS NOT NULL
+    WHERE anonymous_id IS NOT NULL
+      -- Bronze принимает что угодно, поэтому user_id в событии может
+      -- указывать в пустоту. Без этой проверки одно такое событие роняло бы
+      -- весь прогон ETL на внешнем ключе — и витрины замирали бы навсегда.
+      AND EXISTS (SELECT 1 FROM users u WHERE u.id = candidates.user_id)
     ORDER BY anonymous_id, linked_at
     ON CONFLICT (anonymous_id) DO NOTHING
   `);

@@ -33,6 +33,11 @@ async function authorizeCallAccess({ user, communityId, inviteId, anonymousId })
   if (invite.expires_at != null && new Date(invite.expires_at) <= new Date()) {
     throw new HttpError(410, 'invite_expired');
   }
+  // Исчерпанная ссылка недействительна целиком: превью инвайта показывает её
+  // как непригодную, значит и в звонок по ней пускать нельзя.
+  if (invite.max_uses != null && invite.use_count >= invite.max_uses) {
+    throw new HttpError(410, 'invite_exhausted');
+  }
 }
 
 callsRouter.post(
@@ -59,9 +64,20 @@ callsRouter.post(
       return res.json({ call: active[0], created: false });
     }
 
-    const { rows } = await query('INSERT INTO calls (channel_id) VALUES ($1) RETURNING *', [
-      channelId,
-    ]);
+    // Гонку двух одновременных запросов снимает уникальный индекс по каналу:
+    // проигравший не падает, а получает уже созданную сессию.
+    const { rows } = await query(
+      'INSERT INTO calls (channel_id) VALUES ($1) ON CONFLICT DO NOTHING RETURNING *',
+      [channelId],
+    );
+    if (rows.length === 0) {
+      const { rows: existing } = await query(
+        'SELECT * FROM calls WHERE channel_id = $1 AND ended_at IS NULL LIMIT 1',
+        [channelId],
+      );
+      if (existing.length === 0) throw new HttpError(409, 'call_creation_conflict');
+      return res.json({ call: existing[0], created: false });
+    }
     return res.status(201).json({ call: rows[0], created: true });
   }),
 );
@@ -162,7 +178,11 @@ callsRouter.post(
   optionalAuth,
   asyncHandler(async (req, res) => {
     const callId = parseUuid(req.params.id, 'call_id');
-    const anonymousId = req.body?.anonymous_id ?? null;
+    // У вошедшего есть user_id, и участие ищется только по нему: иначе,
+    // подставив чужой anonymous_id, можно было бы закрыть чужое участие
+    // (и обнулить чужую длительность). Гость, зарегистрировавшийся во время
+    // звонка, тоже найдётся по user_id — его запись привязали при входе.
+    const anonymousId = req.user ? null : (req.body?.anonymous_id ?? null);
     if (!req.user && !anonymousId) throw new HttpError(400, 'anonymous_id_required');
 
     const participant = await withTransaction(async (client) => {

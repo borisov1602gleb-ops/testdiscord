@@ -82,6 +82,9 @@ CREATE TABLE login_codes (
   code       TEXT NOT NULL,
   expires_at TIMESTAMPTZ NOT NULL,
   used       BOOLEAN NOT NULL DEFAULT false,
+  -- Неудачные попытки ввода: после нескольких код гасится, иначе шестизначное
+  -- число можно перебирать всё время его жизни.
+  attempts   INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -95,6 +98,8 @@ CREATE TABLE events_bronze (
 );
 
 CREATE INDEX idx_messages_channel_created ON messages (channel_id, created_at);
+-- Один активный звонок на канал — гарантируется базой, а не только кодом.
+CREATE UNIQUE INDEX uniq_active_call_per_channel ON calls (channel_id) WHERE ended_at IS NULL;
 CREATE INDEX idx_call_participants_call ON call_participants (call_id);
 CREATE INDEX idx_call_participants_anonymous ON call_participants (anonymous_id) WHERE anonymous_id IS NOT NULL;
 CREATE INDEX idx_community_members_user ON community_members (user_id);

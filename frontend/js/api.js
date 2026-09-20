@@ -18,6 +18,12 @@ const MESSAGES = {
   call_ended: 'Звонок уже завершён',
   active_participation_not_found: 'Вы уже вышли из звонка',
   content_required: 'Сообщение не может быть пустым',
+  content_too_long: 'Сообщение слишком длинное — максимум 2000 символов',
+  payload_too_large: 'Слишком большой запрос',
+  too_many_attempts: 'Слишком много попыток — запросите новый код',
+  invalid_expires_at: 'Некорректная дата окончания',
+  invalid_max_uses: 'Некорректное число использований',
+  call_creation_conflict: 'Звонок уже создаётся — попробуйте ещё раз',
   unauthorized: 'Нужно войти заново',
 };
 

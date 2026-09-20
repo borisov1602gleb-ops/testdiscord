@@ -10,7 +10,8 @@ import { config } from './config.js';
 import { pool, waitForDatabase } from './db.js';
 import { errorHandler } from './lib/http.js';
 import { initRealtime } from './lib/realtime.js';
-import { ensureAnalyticsSchema, startEtlScheduler } from './etl/index.js';
+import { applySchema } from './lib/schema.js';
+import { startEtlScheduler } from './etl/index.js';
 import { authRouter } from './routes/auth.js';
 import { usersRouter } from './routes/users.js';
 import { communitiesRouter } from './routes/communities.js';
@@ -23,7 +24,9 @@ export const app = express();
 // На этапе MVP клиент и API живут на одном адресе, поэтому cors() открыт
 // целиком. В проде список источников нужно сузить до своего домена.
 app.use(cors());
-app.use(express.json());
+// Явный лимит тела запроса: сообщения ограничены 2000 символами, картинок
+// и файлов в MVP нет, поэтому больше 100 КБ присылать нечего.
+app.use(express.json({ limit: '100kb' }));
 
 app.get('/health', async (_req, res) => {
   try {
@@ -58,9 +61,9 @@ const server = http.createServer(app);
 initRealtime(server);
 
 await waitForDatabase();
-// Таблицы слоёв Silver/Gold создаются при старте: DDL идемпотентный,
-// поэтому обновление кода не требует отдельной миграции.
-await ensureAnalyticsSchema();
+// Идемпотентные миграции и таблицы слоёв применяются при старте, поэтому
+// обновление кода не требует отдельного шага «накатить миграцию».
+await applySchema();
 server.listen(config.port, () => {
   console.log(`[backend] listening on :${config.port}`);
   startEtlScheduler();

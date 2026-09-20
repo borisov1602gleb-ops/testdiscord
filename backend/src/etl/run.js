@@ -2,10 +2,11 @@
 // Полезен, когда backend не запущен или нужно пересчитать витрины прямо
 // сейчас и увидеть результат в консоли.
 import { pool, waitForDatabase } from '../db.js';
-import { ensureAnalyticsSchema, runEtl } from './index.js';
+import { applySchema } from '../lib/schema.js';
+import { runEtl } from './index.js';
 
 await waitForDatabase();
-await ensureAnalyticsSchema();
+await applySchema();
 
 const result = await runEtl();
 if (result.skipped) {

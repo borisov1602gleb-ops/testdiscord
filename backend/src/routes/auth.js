@@ -14,6 +14,9 @@ import { getProfile } from '../lib/users.js';
 
 export const authRouter = Router();
 
+// Сколько раз можно ошибиться в коде, прежде чем он сгорит.
+const MAX_CODE_ATTEMPTS = 5;
+
 function normalizeEmail(email) {
   return String(email).trim().toLowerCase();
 }
@@ -68,17 +71,39 @@ authRouter.post(
     if (!email || !code) throw new HttpError(400, 'email_and_code_required');
     const normalizedEmail = normalizeEmail(email);
 
-    const result = await withTransaction(async (client) => {
-      const { rows: codeRows } = await client.query(
-        `SELECT id FROM login_codes
-         WHERE email = $1 AND code = $2 AND used = false AND expires_at > now()
-         ORDER BY created_at DESC LIMIT 1
-         FOR UPDATE`,
-        [normalizedEmail, String(code)],
-      );
-      if (codeRows.length === 0) throw new HttpError(400, 'invalid_or_expired_code');
+    // Проверка кода идёт до транзакции: счётчик неудачных попыток должен
+    // сохраниться именно тогда, когда попытка неудачна, а транзакция при
+    // ошибке откатилась бы вместе с ним.
+    // Берём последний живой код этой почты, а не первый совпавший с
+    // присланным: иначе перебору просто нечего было бы считать.
+    const { rows: codeRows } = await query(
+      `SELECT id, code, attempts FROM login_codes
+       WHERE email = $1 AND used = false AND expires_at > now()
+       ORDER BY created_at DESC LIMIT 1`,
+      [normalizedEmail],
+    );
+    if (codeRows.length === 0) throw new HttpError(400, 'invalid_or_expired_code');
+    const loginCode = codeRows[0];
 
-      await client.query('UPDATE login_codes SET used = true WHERE id = $1', [codeRows[0].id]);
+    if (loginCode.attempts >= MAX_CODE_ATTEMPTS) {
+      // Код сгорел: дальше нужен новый, перебирать больше нечего.
+      await query('UPDATE login_codes SET used = true WHERE id = $1', [loginCode.id]);
+      throw new HttpError(429, 'too_many_attempts');
+    }
+
+    if (loginCode.code !== String(code)) {
+      await query('UPDATE login_codes SET attempts = attempts + 1 WHERE id = $1', [loginCode.id]);
+      throw new HttpError(400, 'invalid_or_expired_code');
+    }
+
+    const result = await withTransaction(async (client) => {
+      // Гасим код внутри транзакции и только если он ещё не погашен:
+      // два одновременных запроса с верным кодом не должны оба пройти.
+      const { rowCount: consumed } = await client.query(
+        'UPDATE login_codes SET used = true WHERE id = $1 AND used = false',
+        [loginCode.id],
+      );
+      if (consumed === 0) throw new HttpError(400, 'invalid_or_expired_code');
 
       const { rows: existing } = await client.query(
         'SELECT id, email, registration_source, created_at FROM users WHERE email = $1',
