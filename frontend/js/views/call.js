@@ -494,10 +494,27 @@ export async function renderCall(callId) {
     if (share) {
       if (shareSlot.dataset.track !== share.track.sid) {
         shareSlot.dataset.track = share.track.sid;
+        const video = share.track.attach();
+        video.autoplay = true;
+        video.playsInline = true;
+        video.muted = true;
         shareSlot.replaceChildren(
           el('div', { class: 'share-surface' }, [
-            share.track.attach(),
+            video,
             el('div', { class: 'share-badge' }, [el('span', { class: 'dot' }), share.name]),
+            el(
+              'button',
+              {
+                class: 'share-expand',
+                type: 'button',
+                title: 'Развернуть на весь экран',
+                onclick: () =>
+                  document.fullscreenElement
+                    ? document.exitFullscreen()
+                    : video.requestFullscreen?.(),
+              },
+              [icon('expand', 16)],
+            ),
           ]),
         );
       }
