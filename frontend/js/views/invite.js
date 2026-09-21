@@ -1,27 +1,56 @@
+// Превью приглашения — первый экран для человека со стороны. Главная задача:
+// дать зайти в звонок без регистрации, а регистрацию предложить потом.
 import { api } from '../api.js';
 import { store } from '../store.js';
-import { el, mount } from '../dom.js';
+import { el, mount, icon } from '../dom.js';
 import { navigate } from '../router.js';
+
+function renderCard(children, invalid = false) {
+  mount(
+    el('div', { class: invalid ? 'invite is-invalid' : 'invite' }, [
+      el('div', { class: 'invite-card' }, children),
+    ]),
+  );
+}
 
 export async function renderInvite(inviteId) {
   let preview;
   try {
     preview = await api(`/invites/${inviteId}?anonymous_id=${store.anonymousId}`, { auth: false });
   } catch (err) {
-    return mount(
-      el('div', { class: 'centered' }, [
-        el('div', { class: 'card' }, [
-          el('h1', { text: 'Приглашение недоступно' }),
-          el('p', { class: 'subtitle', text: err.message }),
-          el('div', { class: 'actions' }, [
-            el('button', { text: 'На главную', onclick: () => navigate('#/') }),
-          ]),
+    return renderCard(
+      [
+        el('span', { class: 'invite-kicker', text: 'Приглашение в сообщество' }),
+        el('h1', { class: 'empty-title', text: 'Приглашение недоступно' }),
+        el('p', { class: 'invite-hint', text: err.message }),
+        el('div', { class: 'invite-actions' }, [
+          el('button', {
+            class: 'btn btn-secondary btn-block',
+            type: 'button',
+            text: 'На главную',
+            onclick: () => navigate('#/'),
+          }),
         ]),
-      ]),
+      ],
+      true,
     );
   }
 
-  const error = el('p', { class: 'error' });
+  if (!preview.valid) {
+    return renderCard(
+      [
+        el('span', { class: 'invite-kicker', text: 'Приглашение в сообщество' }),
+        el('h1', {
+          class: 'empty-title',
+          text: 'Срок действия приглашения истёк или оно исчерпано',
+        }),
+        el('p', { class: 'invite-hint', text: 'Попросите новую ссылку у того, кто вас позвал' }),
+      ],
+      true,
+    );
+  }
+
+  const error = el('p', { class: 'field-error' });
 
   async function joinCall() {
     error.textContent = '';
@@ -57,52 +86,47 @@ export async function renderInvite(inviteId) {
     }
   }
 
-  function goToLogin() {
-    store.pendingInvite = inviteId;
-    navigate('#/login');
+  async function joinCommunity() {
+    try {
+      await api(`/invites/${inviteId}/join`, { method: 'POST' });
+      navigate('#/');
+    } catch (err) {
+      error.textContent = err.message;
+    }
   }
 
-  mount(
-    el('div', { class: 'centered' }, [
-      el('div', { class: 'card' }, [
-        el('p', { class: 'subtitle', text: 'Приглашение в сообщество' }),
-        el('h1', { text: preview.community.name }),
-        preview.valid
-          ? el('p', {
-              class: 'subtitle',
-              text: preview.voice_channel
-                ? `Голосовой канал: ${preview.voice_channel.name}`
-                : 'Голосовых каналов пока нет',
-            })
-          : el('div', {
-              class: 'banner warning',
-              text: 'Срок действия приглашения истёк или оно исчерпано',
-            }),
-        preview.valid &&
-          el('div', { class: 'actions' }, [
-            el('button', { text: 'Присоединиться к звонку', onclick: joinCall }),
-            el('button', {
-              class: 'secondary',
-              text: store.isAuthenticated ? 'Вступить в сообщество' : 'Войти и вступить',
-              onclick: store.isAuthenticated
-                ? async () => {
-                    try {
-                      await api(`/invites/${inviteId}/join`, { method: 'POST' });
-                      navigate('#/');
-                    } catch (err) {
-                      error.textContent = err.message;
-                    }
-                  }
-                : goToLogin,
-            }),
-          ]),
-        !store.isAuthenticated &&
-          el('p', {
-            class: 'hint',
-            text: 'К звонку можно подключиться без регистрации — она понадобится, только чтобы остаться в сообществе',
-          }),
-        error,
+  renderCard([
+    el('span', { class: 'invite-kicker', text: 'Приглашение в сообщество' }),
+    el('h1', { class: 'invite-name', text: preview.community.name }),
+    preview.voice_channel &&
+      el('span', { class: 'invite-meta' }, [
+        icon('speaker', 15),
+        `Голосовой канал: ${preview.voice_channel.name}`,
       ]),
+    el('div', { class: 'invite-actions' }, [
+      el('button', {
+        class: 'btn btn-primary btn-lg btn-block',
+        type: 'button',
+        text: 'Присоединиться к звонку',
+        onclick: joinCall,
+      }),
+      el('button', {
+        class: 'btn btn-secondary btn-block',
+        type: 'button',
+        text: store.isAuthenticated ? 'Вступить в сообщество' : 'Войти и вступить',
+        onclick: store.isAuthenticated
+          ? joinCommunity
+          : () => {
+              store.pendingInvite = inviteId;
+              navigate('#/login');
+            },
+      }),
     ]),
-  );
+    !store.isAuthenticated &&
+      el('p', {
+        class: 'invite-hint',
+        text: 'К звонку можно подключиться без регистрации — она понадобится, только чтобы остаться в сообществе',
+      }),
+    error,
+  ]);
 }

@@ -1,3 +1,7 @@
+// Приглашения — вход в продукт для нового человека: владелец создаёт ссылку,
+// гость открывает её без регистрации (превью), а вступает в сообщество уже
+// зарегистрированным. Ограничения по сроку и числу использований проверяются
+// здесь же.
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
 import { query, withTransaction } from '../db.js';
@@ -19,6 +23,11 @@ invitesRouter.post(
     const { expires_at: expiresAt, max_uses: maxUses } = req.body ?? {};
     if (maxUses != null && (!Number.isInteger(maxUses) || maxUses < 1)) {
       throw new HttpError(400, 'invalid_max_uses');
+    }
+    // Дату разбираем сами: нечитаемая строка иначе доезжала до PostgreSQL
+    // и возвращалась пользователю как внутренняя ошибка сервера.
+    if (expiresAt != null && Number.isNaN(new Date(expiresAt).getTime())) {
+      throw new HttpError(400, 'invalid_expires_at');
     }
 
     const { rows } = await query(
