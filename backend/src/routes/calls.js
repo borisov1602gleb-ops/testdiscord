@@ -1,3 +1,7 @@
+// Звонки. Backend отвечает за состояние (кто когда подключился и сколько
+// пробыл) и за выдачу токена доступа; сам звук идёт мимо него — напрямую
+// между браузером и LiveKit. Поэтому участие корректно закрывается даже
+// тогда, когда сервер звонков недоступен.
 import { Router } from 'express';
 import { query, withTransaction } from '../db.js';
 import { asyncHandler, HttpError } from '../lib/http.js';
@@ -6,6 +10,7 @@ import { optionalAuth } from '../middleware/auth.js';
 import { requireMembership, getChannel } from '../lib/access.js';
 import { parseUuid } from '../lib/validate.js';
 import { createCallToken } from '../lib/livekit.js';
+import { getProfile } from '../lib/users.js';
 import { config } from '../config.js';
 
 export const callsRouter = Router();
@@ -27,6 +32,11 @@ async function authorizeCallAccess({ user, communityId, inviteId, anonymousId })
   if (!invite || invite.community_id !== communityId) throw new HttpError(403, 'invite_mismatch');
   if (invite.expires_at != null && new Date(invite.expires_at) <= new Date()) {
     throw new HttpError(410, 'invite_expired');
+  }
+  // Исчерпанная ссылка недействительна целиком: превью инвайта показывает её
+  // как непригодную, значит и в звонок по ней пускать нельзя.
+  if (invite.max_uses != null && invite.use_count >= invite.max_uses) {
+    throw new HttpError(410, 'invite_exhausted');
   }
 }
 
@@ -54,9 +64,20 @@ callsRouter.post(
       return res.json({ call: active[0], created: false });
     }
 
-    const { rows } = await query('INSERT INTO calls (channel_id) VALUES ($1) RETURNING *', [
-      channelId,
-    ]);
+    // Гонку двух одновременных запросов снимает уникальный индекс по каналу:
+    // проигравший не падает, а получает уже созданную сессию.
+    const { rows } = await query(
+      'INSERT INTO calls (channel_id) VALUES ($1) ON CONFLICT DO NOTHING RETURNING *',
+      [channelId],
+    );
+    if (rows.length === 0) {
+      const { rows: existing } = await query(
+        'SELECT * FROM calls WHERE channel_id = $1 AND ended_at IS NULL LIMIT 1',
+        [channelId],
+      );
+      if (existing.length === 0) throw new HttpError(409, 'call_creation_conflict');
+      return res.json({ call: existing[0], created: false });
+    }
     return res.status(201).json({ call: rows[0], created: true });
   }),
 );
@@ -109,18 +130,38 @@ callsRouter.post(
       throw err;
     }
 
-    const { rows: participantRows } = await query(
-      `INSERT INTO call_participants (call_id, user_id, anonymous_id)
-       VALUES ($1, $2, $3)
-       RETURNING *`,
+    // Повторное подключение (перезагрузка страницы, обрыв связи) не должно
+    // плодить незакрытые записи участия: иначе звонок никогда не завершится,
+    // а duration_sec первой записи потеряется.
+    const { rows: openRows } = await query(
+      `SELECT * FROM call_participants
+       WHERE call_id = $1
+         AND left_at IS NULL
+         AND (($2::uuid IS NOT NULL AND user_id = $2::uuid)
+              OR ($3::text IS NOT NULL AND anonymous_id = $3::text))
+       ORDER BY joined_at DESC
+       LIMIT 1`,
       [callId, req.user?.id ?? null, anonymousId],
     );
 
+    const participantRows = openRows.length
+      ? openRows
+      : (
+          await query(
+            `INSERT INTO call_participants (call_id, user_id, anonymous_id)
+             VALUES ($1, $2, $3)
+             RETURNING *`,
+            [callId, req.user?.id ?? null, anonymousId],
+          )
+        ).rows;
+
+    // В комнату уходит имя из профиля: по нему собеседники подписывают плитки.
     const identity = req.user?.id ?? anonymousId;
+    const profile = req.user ? await getProfile(req.user.id) : null;
     const livekitToken = await createCallToken({
       roomName: callId,
       identity,
-      name: req.user?.email ?? 'guest',
+      name: profile?.public_name ?? 'guest',
     });
 
     await logJoin('success', call.community_id);
@@ -137,7 +178,11 @@ callsRouter.post(
   optionalAuth,
   asyncHandler(async (req, res) => {
     const callId = parseUuid(req.params.id, 'call_id');
-    const anonymousId = req.body?.anonymous_id ?? null;
+    // У вошедшего есть user_id, и участие ищется только по нему: иначе,
+    // подставив чужой anonymous_id, можно было бы закрыть чужое участие
+    // (и обнулить чужую длительность). Гость, зарегистрировавшийся во время
+    // звонка, тоже найдётся по user_id — его запись привязали при входе.
+    const anonymousId = req.user ? null : (req.body?.anonymous_id ?? null);
     if (!req.user && !anonymousId) throw new HttpError(400, 'anonymous_id_required');
 
     const participant = await withTransaction(async (client) => {

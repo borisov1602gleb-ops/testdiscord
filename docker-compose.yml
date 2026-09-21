@@ -7,6 +7,7 @@ services:
       POSTGRES_PASSWORD: postgres
     volumes:
       - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./db/analytics-layers.sql:/docker-entrypoint-initdb.d/02-analytics-layers.sql:ro
       - postgres_data:/var/lib/postgresql/data
     ports:
       - '5432:5432'
@@ -28,6 +29,8 @@ services:
       LIVEKIT_API_KEY: devkey
       LIVEKIT_API_SECRET: secret
       EXPOSE_DEV_CODE: ${EXPOSE_DEV_CODE:-true}
+      # Как часто пересобираются витрины Silver/Gold (0 — только вручную).
+      ETL_INTERVAL_SEC: ${ETL_INTERVAL_SEC:-300}
     ports:
       - '3000:3000'
     depends_on:
@@ -37,8 +40,10 @@ services:
         condition: service_started
 
   # Dev-режим поднимает LiveKit с ключами devkey/secret без отдельного конфига.
+  # Версия закреплена: с сервером старше 1.9 клиент livekit-client 2.x не может
+  # опубликовать микрофон — публикация зависает без ошибки.
   livekit:
-    image: livekit/livekit-server:latest
+    image: livekit/livekit-server:v1.10
     command: --dev --bind 0.0.0.0
     ports:
       - '7880:7880'

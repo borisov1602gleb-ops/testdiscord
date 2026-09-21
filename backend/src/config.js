@@ -1,3 +1,5 @@
+// Единственное место, где читаются переменные окружения. Значения по
+// умолчанию рассчитаны на локальную разработку; в проде задаются снаружи.
 export const config = {
   port: Number(process.env.PORT || 3000),
   databaseUrl:
@@ -6,6 +8,12 @@ export const config = {
   jwtSecret: process.env.JWT_SECRET || 'dev-secret-change-me',
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '30d',
   eventSource: process.env.EVENT_SOURCE || 'backend',
+  etl: {
+    // Как часто пересобираются аналитические слои. 0 выключает
+    // автозапуск — тогда остаётся ручной `npm run etl` и кнопка
+    // «Обновить» на экране аналитики.
+    intervalSec: Number(process.env.ETL_INTERVAL_SEC ?? 300),
+  },
   loginCode: {
     ttlSec: Number(process.env.LOGIN_CODE_TTL_SEC || 600),
     resendCooldownSec: Number(process.env.LOGIN_CODE_COOLDOWN_SEC || 60),

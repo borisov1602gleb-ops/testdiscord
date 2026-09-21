@@ -1,3 +1,6 @@
+// Аутентификация по токену. Пароля в продукте нет: пользователь получает код
+// на почту, а в обмен на него — JWT, который клиент присылает в заголовке
+// Authorization. Гостевые сценарии работают вообще без токена (optionalAuth).
 import jwt from 'jsonwebtoken';
 import { config } from '../config.js';
 import { HttpError } from '../lib/http.js';
