@@ -66,6 +66,21 @@ check "участник не владелец — аналитика закры�
   "$(status GET "$API/communities/$CID/analytics" '' "$MEMBER")"
 check "владелец видит аналитику" 200 "$(status GET "$API/communities/$CID/analytics" '' "$OWNER")"
 
+echo '--- состав и настройки сообщества ---'
+check "участник видит состав сообщества" 200 "$(status GET "$API/communities/$CID/members" '' "$MEMBER")"
+check "посторонний состав не видит" 403 "$(status GET "$API/communities/$CID/members" '' "$OUTSIDER")"
+check "владелец переименовывает сообщество" 200 \
+  "$(status PATCH "$API/communities/$CID" '{"name":"Границы и порядок"}' "$OWNER")"
+check "участник переименовать не может" 403 \
+  "$(status PATCH "$API/communities/$CID" '{"name":"Моё теперь"}' "$MEMBER")"
+check "пустое название отклоняется" 400 "$(status PATCH "$API/communities/$CID" '{"name":"  "}' "$OWNER")"
+check "владелец создаёт канал" 201 \
+  "$(status POST "$API/communities/$CID/channels" '{"name":"патчноуты","type":"text"}' "$OWNER")"
+check "участник канал не создаёт" 403 \
+  "$(status POST "$API/communities/$CID/channels" '{"name":"своё","type":"text"}' "$MEMBER")"
+check "выдуманный тип канала отклоняется" 400 \
+  "$(status POST "$API/communities/$CID/channels" '{"name":"видеоканал","type":"video"}' "$OWNER")"
+
 echo '--- приглашения ---'
 check "исчерпанное приглашение невалидно" false \
   "$(curl -sf "$API/invites/$INVITE" | jq -r .valid)"

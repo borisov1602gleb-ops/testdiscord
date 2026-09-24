@@ -182,9 +182,25 @@ export async function renderHome(communityId) {
                 [icon('speaker'), el('span', { class: 'rail-name', text: channel.name })],
               ),
             ),
-            // Аналитика — только для владельца. Это подсказка интерфейса,
-            // а не защита: доступ всё равно проверяется на сервере.
-            role === 'owner' && el('div', { class: 'chan-group', text: 'Управление' }),
+            // Состав сообщества виден всем участникам, аналитика — только
+            // владельцу. Это подсказка интерфейса, а не защита: права
+            // всё равно проверяет сервер.
+            el('div', { class: 'chan-group', text: 'Сообщество' }),
+            el(
+              'button',
+              {
+                class: 'chan-item',
+                type: 'button',
+                onclick: () => navigate(`#/c/${community.id}/settings`),
+              },
+              [
+                icon('people', 16),
+                el('span', {
+                  class: 'rail-name',
+                  text: role === 'owner' ? 'Настройки и участники' : 'Участники',
+                }),
+              ],
+            ),
             role === 'owner' &&
               el(
                 'button',
