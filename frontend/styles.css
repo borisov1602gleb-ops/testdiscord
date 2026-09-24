@@ -405,20 +405,10 @@ p {
 .app {
   display: grid;
   grid-template-columns: var(--rail-w) var(--channels-w) minmax(0, 1fr);
-  /* Приложение — не во весь экран, а окном с полем вокруг: так между
-     рамкой и фоном видно подсветку, и интерфейс читается как единый блок. */
-  height: calc(100% - 64px);
-  max-width: 1340px;
-  margin: 32px auto;
-  border-radius: var(--r-lg);
-  border: 1px solid rgba(233, 233, 237, 0.07);
-  background: linear-gradient(180deg, rgba(41, 43, 49, 0.92), rgba(22, 24, 38, 0.96));
-  overflow: hidden;
-  /* Двойное кольцо изображает ту же градиентную рамку, что в макете. */
-  box-shadow:
-    0 0 0 10px rgba(233, 233, 237, 0.02),
-    0 0 0 11px rgba(181, 171, 252, 0.14),
-    0 40px 120px -30px rgba(38, 42, 96, 0.9);
+  /* Во весь экран: на большом мониторе поля вокруг съедали место под чат.
+     Фон прозрачный — сквозь него видна подсветка страницы. */
+  height: 100%;
+  background: transparent;
 }
 
 .rail,
@@ -717,19 +707,8 @@ p {
 .settings {
   display: grid;
   grid-template-columns: 248px minmax(0, 1fr);
-  /* Та же рамка-окно, что и на главном экране: интерфейс должен
-     восприниматься как одно приложение, а не как разные страницы. */
-  height: calc(100% - 64px);
-  max-width: 1340px;
-  margin: 32px auto;
-  border-radius: var(--r-lg);
-  border: 1px solid rgba(233, 233, 237, 0.07);
-  background: linear-gradient(180deg, rgba(41, 43, 49, 0.92), rgba(22, 24, 38, 0.96));
-  overflow: hidden;
-  box-shadow:
-    0 0 0 10px rgba(233, 233, 237, 0.02),
-    0 0 0 11px rgba(181, 171, 252, 0.14),
-    0 40px 120px -30px rgba(38, 42, 96, 0.9);
+  height: 100%;
+  background: transparent;
 }
 
 .settings-nav {
@@ -1779,18 +1758,6 @@ p {
    иначе с телефона нельзя было бы переключить канал или сообщество. */
 
 @media (max-width: 720px) {
-  /* На телефоне рамка-окно только съедает место: разворачиваем во весь
-     экран и убираем кольцо. */
-  .app,
-  .settings {
-    height: 100%;
-    margin: 0;
-    max-width: none;
-    border: 0;
-    border-radius: 0;
-    box-shadow: none;
-  }
-
   .app {
     /* minmax(0,…), а не 1fr: иначе содержимое чата расталкивает колонку
        шире экрана и появляется горизонтальная прокрутка. */
