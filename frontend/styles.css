@@ -827,6 +827,22 @@ p {
   font-size: var(--fs-sm);
 }
 
+/* Метка роли в списке участников: владелец выделен акцентом. */
+.role-badge {
+  margin-left: auto;
+  flex: none;
+  padding: 3px 10px;
+  border-radius: var(--r-pill);
+  font-size: var(--fs-xs);
+  background: rgba(233, 233, 237, 0.06);
+  color: var(--text-muted);
+}
+
+.role-badge.is-owner {
+  background: var(--accent-tint-strong);
+  color: var(--accent-soft);
+}
+
 .row-note {
   font-size: var(--fs-xs);
   color: var(--text-faint);
@@ -866,7 +882,23 @@ p {
   cursor: pointer;
 }
 
-.check .row-note {
+.check /* Метка роли в списке участников: владелец выделен акцентом. */
+.role-badge {
+  margin-left: auto;
+  flex: none;
+  padding: 3px 10px;
+  border-radius: var(--r-pill);
+  font-size: var(--fs-xs);
+  background: rgba(233, 233, 237, 0.06);
+  color: var(--text-muted);
+}
+
+.role-badge.is-owner {
+  background: var(--accent-tint-strong);
+  color: var(--accent-soft);
+}
+
+.row-note {
   display: block;
 }
 

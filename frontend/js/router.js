@@ -7,6 +7,7 @@ import { renderInvite } from './views/invite.js';
 import { renderCall } from './views/call.js';
 import { renderSettings } from './views/settings.js';
 import { renderAnalytics } from './views/analytics.js';
+import { renderCommunity } from './views/community.js';
 
 const routes = [
   { pattern: /^#\/login$/, open: true, view: () => renderLogin() },
@@ -16,6 +17,7 @@ const routes = [
   // Аналитика объявлена раньше карточки сообщества: иначе более общий
   // шаблон #/c/:id перехватил бы адрес.
   { pattern: /^#\/c\/([\w-]+)\/analytics$/, view: (id) => renderAnalytics(id) },
+  { pattern: /^#\/c\/([\w-]+)\/settings$/, view: (id) => renderCommunity(id) },
   { pattern: /^#\/c\/([\w-]+)$/, view: (id) => renderHome(id) },
   { pattern: /^#\/?$/, view: () => renderHome(null) },
 ];
