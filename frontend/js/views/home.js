@@ -124,7 +124,7 @@ export async function renderHome(communityId) {
     mount(
       el('div', { class: 'app' }, [
         el('nav', { class: 'rail' }, [
-          el('p', { class: 'pane-head' }, [logo(18), el('span', { text: 'Сообщества' })]),
+          el('p', { class: 'pane-head' }, [logo(32), el('span', { text: 'Сообщества' })]),
           el(
             'div',
             { class: 'pane-list' },
@@ -151,6 +151,9 @@ export async function renderHome(communityId) {
               onclick: showCommunityModal,
             }),
           ]),
+          // Профиль внизу левой колонки — как в макете: он относится ко
+          // всему приложению, а не к конкретному сообществу.
+          userZone(),
         ]),
 
         el('nav', { class: 'channels' }, [
@@ -193,7 +196,6 @@ export async function renderHome(communityId) {
                 [icon('chart', 16), el('span', { class: 'rail-name', text: 'Аналитика' })],
               ),
           ]),
-          userZone(),
         ]),
 
         el('main', { class: 'chat' }, [
