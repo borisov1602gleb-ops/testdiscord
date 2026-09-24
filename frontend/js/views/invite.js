@@ -2,13 +2,13 @@
 // дать зайти в звонок без регистрации, а регистрацию предложить потом.
 import { api } from '../api.js';
 import { store } from '../store.js';
-import { el, mount, icon } from '../dom.js';
+import { el, mount, icon, logo } from '../dom.js';
 import { navigate } from '../router.js';
 
 function renderCard(children, invalid = false) {
   mount(
     el('div', { class: invalid ? 'invite is-invalid' : 'invite' }, [
-      el('div', { class: 'invite-card' }, children),
+      el('div', { class: 'invite-card' }, [el('div', { class: 'invite-logo' }, [logo(44)]), ...children]),
     ]),
   );
 }
