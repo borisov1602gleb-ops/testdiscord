@@ -7,6 +7,35 @@ import { el, mount, icon, initial } from '../dom.js';
 import { navigate } from '../router.js';
 import { showInviteModal } from './home.js';
 
+// Опасное действие подтверждается вторым нажатием на ту же кнопку:
+// отдельное окно ради одного вопроса — лишнее, а случайный клик
+// не должен никого выкидывать из сообщества.
+function confirmingButton({ label, confirmLabel, className, onConfirm }) {
+  let armed = false;
+  const button = el('button', {
+    class: className,
+    type: 'button',
+    text: label,
+    onclick: async () => {
+      if (!armed) {
+        armed = true;
+        button.textContent = confirmLabel;
+        setTimeout(() => {
+          if (!armed) return;
+          armed = false;
+          button.textContent = label;
+        }, 4000);
+        return;
+      }
+      armed = false;
+      button.disabled = true;
+      button.textContent = 'Секунду…';
+      await onConfirm(button);
+    },
+  });
+  return button;
+}
+
 const ROLE_LABELS = { owner: 'Владелец', member: 'Участник' };
 
 function formatDate(iso) {
@@ -140,19 +169,63 @@ export async function renderCommunity(communityId) {
   }
 
   // ===== участники =====
-  const memberRows = members.map((member) =>
-    el('div', { class: 'settings-row' }, [
-      el('div', { class: 'user-avatar', text: initial(member.name) }),
-      el('div', {}, [
-        el('p', { class: 'row-title', text: member.name }),
-        el('p', { class: 'row-note', text: `В сообществе с ${formatDate(member.joined_at)}` }),
-      ]),
-      el('span', {
-        class: member.role === 'owner' ? 'role-badge is-owner' : 'role-badge',
-        text: ROLE_LABELS[member.role] ?? member.role,
-      }),
-    ]),
-  );
+  const membersSection = el('section', { class: 'settings-section' });
+  const membersKicker = el('p', { class: 'settings-kicker' });
+
+  async function removeMember(member, button) {
+    try {
+      await api(`/communities/${communityId}/members/${member.id}`, { method: 'DELETE' });
+      members = members.filter((m) => m.id !== member.id);
+      drawMembers();
+    } catch (err) {
+      button.disabled = false;
+      button.textContent = err.message;
+    }
+  }
+
+  function drawMembers() {
+    membersKicker.textContent = `Участники · ${members.length}`;
+    membersSection.replaceChildren(
+      ...members.map((member) =>
+        el('div', { class: 'settings-row' }, [
+          el('div', { class: 'user-avatar', text: initial(member.name) }),
+          el('div', {}, [
+            el('p', { class: 'row-title', text: member.name }),
+            el('p', { class: 'row-note', text: `В сообществе с ${formatDate(member.joined_at)}` }),
+          ]),
+          el('span', {
+            class: member.role === 'owner' ? 'role-badge is-owner' : 'role-badge',
+            text: ROLE_LABELS[member.role] ?? member.role,
+          }),
+          // Исключить может только владелец и только не себя: сообщество
+          // не должно остаться без хозяина.
+          isOwner &&
+            member.role !== 'owner' &&
+            confirmingButton({
+              label: 'Исключить',
+              confirmLabel: 'Точно исключить?',
+              className: 'btn btn-ghost btn-sm',
+              onConfirm: (button) => removeMember(member, button),
+            }),
+        ]),
+      ),
+    );
+  }
+  drawMembers();
+
+  // ===== уход из сообщества =====
+  const leaveNote = el('p', { class: 'field-error' });
+
+  async function leaveCommunity(button) {
+    try {
+      await api(`/communities/${communityId}/members/me`, { method: 'DELETE' });
+      navigate('#/');
+    } catch (err) {
+      button.disabled = false;
+      button.textContent = 'Покинуть сообщество';
+      leaveNote.textContent = err.message;
+    }
+  }
 
   const title = el('h1', { class: 'settings-title', text: community.name });
 
@@ -242,8 +315,32 @@ export async function renderCommunity(communityId) {
               channelNote,
             ]),
 
-          el('p', { class: 'settings-kicker', text: `Участники · ${members.length}` }),
-          el('section', { class: 'settings-section' }, memberRows),
+          membersKicker,
+          membersSection,
+
+          // Владельцу выход закрыт: пока нет передачи прав, сообщество
+          // осталось бы без хозяина.
+          !isOwner &&
+            el('section', { class: 'settings-section' }, [
+              el('p', { class: 'settings-kicker', text: 'Участие' }),
+              el('div', { class: 'settings-row' }, [
+                icon('signOut', 18),
+                el('div', {}, [
+                  el('p', { class: 'row-title', text: 'Покинуть сообщество' }),
+                  el('p', {
+                    class: 'row-note',
+                    text: 'Сообщество пропадёт из списка. Написанные сообщения останутся в истории.',
+                  }),
+                ]),
+                confirmingButton({
+                  label: 'Покинуть сообщество',
+                  confirmLabel: 'Точно выйти?',
+                  className: 'btn btn-secondary btn-sm',
+                  onConfirm: (button) => leaveCommunity(button),
+                }),
+              ]),
+              leaveNote,
+            ]),
 
           el('p', {
             class: 'row-note',

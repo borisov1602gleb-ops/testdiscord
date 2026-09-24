@@ -23,6 +23,7 @@ const KNOWN_TYPES = [
   'call_joined',
   'registration_completed',
   'community_joined',
+  'community_left',
   'message_sent',
   'call_participated',
 ];
@@ -81,6 +82,7 @@ export async function loadSilver(client) {
         NULLIF(b.payload->>'anonymous_id', '') AS anonymous_id,
         NULLIF(b.payload->>'device_id', '')    AS device_id,
         NULLIF(b.payload->>'join_status', '')  AS join_status,
+        NULLIF(b.payload->>'reason', '')       AS reason,
         NULLIF(b.payload->>'user_id', '')      AS raw_user_id,
         NULLIF(b.payload->>'community_id', '') AS raw_community_id,
         NULLIF(b.payload->>'channel_id', '')   AS raw_channel_id,
@@ -139,7 +141,7 @@ export async function loadSilver(client) {
       INSERT INTO events_silver (
         event_id, event_type, occurred_at, received_at, person_id, user_id,
         anonymous_id, device_id, community_id, channel_id, call_id, invite_id,
-        message_id, join_status, duration_sec, source
+        message_id, join_status, duration_sec, reason, source
       )
       SELECT
         c.event_id,
@@ -163,6 +165,7 @@ export async function loadSilver(client) {
         c.message_id,
         c.join_status,
         c.duration_sec,
+        c.reason,
         c.source
       FROM checked c
       LEFT JOIN identity_map m ON m.anonymous_id = c.anonymous_id

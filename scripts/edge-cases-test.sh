@@ -81,6 +81,24 @@ check "участник канал не создаёт" 403 \
 check "выдуманный тип канала отклоняется" 400 \
   "$(status POST "$API/communities/$CID/channels" '{"name":"видеоканал","type":"video"}' "$OWNER")"
 
+echo '--- выход и исключение ---'
+LEAVER="$(login "edge-leaver-$S@example.com")"
+LEAVER_ID="$(curl -sf "$API/users/me" -H "authorization: Bearer $LEAVER" | jq -r .user.id)"
+FRESH_INVITE="$(curl -sf -X POST "$API/invites" -H 'content-type: application/json' \
+  -H "authorization: Bearer $OWNER" -d "{\"community_id\":\"$CID\"}" | jq -r .invite.id)"
+curl -sf -X POST "$API/invites/$FRESH_INVITE/join" -H 'content-type: application/json' \
+  -H "authorization: Bearer $LEAVER" -d '{}' > /dev/null
+
+check "владелец уйти не может" 400 "$(status DELETE "$API/communities/$CID/members/me" '' "$OWNER")"
+check "участник не исключает другого" 403 \
+  "$(status DELETE "$API/communities/$CID/members/$LEAVER_ID" '' "$MEMBER")"
+check "владелец исключает участника" 200 \
+  "$(status DELETE "$API/communities/$CID/members/$LEAVER_ID" '' "$OWNER")"
+check "исключённый теряет доступ" 403 "$(status GET "$API/communities/$CID" '' "$LEAVER")"
+check "повторное исключение — уже некого" 404 \
+  "$(status DELETE "$API/communities/$CID/members/$LEAVER_ID" '' "$OWNER")"
+check "участник выходит сам" 200 "$(status DELETE "$API/communities/$CID/members/me" '' "$MEMBER")"
+
 echo '--- приглашения ---'
 check "исчерпанное приглашение невалидно" false \
   "$(curl -sf "$API/invites/$INVITE" | jq -r .valid)"

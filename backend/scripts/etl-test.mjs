@@ -228,6 +228,29 @@ const { rows: leaked } = await pool.query(
 );
 check('мусор не попал в Silver', leaked[0].n, 0);
 
+// ===== уход из сообщества =====
+// Проверяем всю цепочку: событие → Silver → витрина жизненного цикла.
+await pool.query('DELETE FROM community_members WHERE community_id = $1 AND user_id = $2', [
+  communityId,
+  guestUserId,
+]);
+await bronze('community_left', {
+  user_id: guestUserId,
+  community_id: communityId,
+  reason: 'left',
+  removed_by: null,
+}, { minutesAgo: 5 });
+await runEtl();
+
+const { rows: departed } = await pool.query(
+  `SELECT left_at IS NOT NULL AS has_left, left_reason, early_leave
+   FROM gold_member_lifecycle WHERE community_id = $1 AND user_id = $2`,
+  [communityId, guestUserId],
+);
+check('ушедший остаётся в витрине', departed.length, 1);
+check('уход записан с причиной', departed[0]?.left_reason, 'left');
+check('уход в первые дни считается ранним', departed[0]?.early_leave, true);
+
 // ===== событие про несуществующего пользователя не ломает прогон =====
 // Bronze принимает что угодно, поэтому в логе может оказаться user_id,
 // которого в базе нет. Раньше одно такое событие роняло ETL на внешнем
