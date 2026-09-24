@@ -3,7 +3,7 @@
 // его возвращаться по ссылке ещё раз.
 import { api } from '../api.js';
 import { store } from '../store.js';
-import { el, mount, icon } from '../dom.js';
+import { el, mount, logo } from '../dom.js';
 import { navigate } from '../router.js';
 
 export function renderLogin() {
@@ -86,7 +86,7 @@ export function renderLogin() {
     });
 
     return el('form', { class: 'auth-card', onsubmit: (e) => (e.preventDefault(), sendCode()) }, [
-      el('div', { class: 'auth-mark' }, [icon('mark', 14), el('span', { text: 'Сообщества' })]),
+      el('div', { class: 'auth-mark' }, [logo(28), el('span', { text: 'Сообщества' })]),
       el('h1', { class: 'auth-title', text: 'Вход' }),
       el('p', { class: 'auth-sub', text: 'Пришлём код на почту — пароль не нужен' }),
       el('div', { class: 'field' }, [

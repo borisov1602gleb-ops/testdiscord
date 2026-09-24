@@ -2,7 +2,7 @@
 // создаются сообщества и приглашения и происходит вход в голосовой канал.
 import { api } from '../api.js';
 import { store } from '../store.js';
-import { el, mount, formatTime, icon, initial } from '../dom.js';
+import { el, mount, formatTime, icon, initial, logo } from '../dom.js';
 import { playChime } from '../settings.js';
 import { navigate } from '../router.js';
 
@@ -124,7 +124,7 @@ export async function renderHome(communityId) {
     mount(
       el('div', { class: 'app' }, [
         el('nav', { class: 'rail' }, [
-          el('p', { class: 'pane-head', text: 'Сообщества' }),
+          el('p', { class: 'pane-head' }, [logo(18), el('span', { text: 'Сообщества' })]),
           el(
             'div',
             { class: 'pane-list' },

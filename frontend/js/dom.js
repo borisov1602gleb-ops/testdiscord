@@ -30,6 +30,21 @@ export function initial(value) {
   return (value ?? '?').trim().slice(0, 1) || '?';
 }
 
+// Знак продукта. Это картинка, а не иконка-контур: логотип с градиентом
+// одной линией не собрать. Файл лежит в frontend/assets и отдаётся тем же
+// сервером, что и остальной клиент.
+export function logo(size = 24) {
+  return el('img', {
+    class: 'logo',
+    src: '/assets/logo.png',
+    // Пустой alt намеренно: рядом всегда есть название словами, и для
+    // читалки экрана картинка была бы лишним повтором.
+    alt: '',
+    width: String(size),
+    height: String(size),
+  });
+}
+
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 // Иконки из макета. Держим их описанием, а не строкой разметки, чтобы

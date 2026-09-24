@@ -315,6 +315,14 @@ p {
   box-shadow: var(--shadow-sm);
 }
 
+.logo {
+  display: block;
+  flex: none;
+  /* Мягкое свечение под знаком: на тёмном фоне он иначе выглядит
+     наклейкой, а не частью экрана. */
+  filter: drop-shadow(0 0 12px rgba(145, 132, 217, 0.35));
+}
+
 .auth-mark {
   display: flex;
   align-items: center;
@@ -327,6 +335,14 @@ p {
 
 .auth-title {
   font-size: var(--fs-2xl);
+}
+
+/* Знак в карточке приглашения: первый экран, который видит человек
+   со стороны, поэтому знак крупнее и по центру. */
+.invite-logo {
+  display: flex;
+  justify-content: center;
+  margin-bottom: var(--sp-4);
 }
 
 .auth-sub {
@@ -396,6 +412,9 @@ p {
 }
 
 .pane-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
   padding: var(--sp-4) var(--sp-4) var(--sp-2);
   font-size: var(--fs-xs);
   letter-spacing: var(--tracking-caps);
