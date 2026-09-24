@@ -177,8 +177,8 @@ CREATE TABLE IF NOT EXISTS gold_member_lifecycle (
   PRIMARY KEY (community_id, person_id)
 );
 
--- Длительности звонков: среднее, медиана и максимум считаются один раз
--- при сборке витрины, а не на каждом открытии экрана.
+-- Длительности звонков: среднее, медиана, перцентили и максимум считаются
+-- один раз при сборке витрины, а не на каждом открытии экрана.
 CREATE TABLE IF NOT EXISTS gold_call_stats (
   community_id   UUID PRIMARY KEY,
   participations INTEGER NOT NULL DEFAULT 0,
@@ -187,3 +187,27 @@ CREATE TABLE IF NOT EXISTS gold_call_stats (
   median_sec     INTEGER NOT NULL DEFAULT 0,
   longest_sec    INTEGER NOT NULL DEFAULT 0
 );
+
+-- Причина ухода из сообщества: сам вышел или исключил владелец.
+ALTER TABLE events_silver ADD COLUMN IF NOT EXISTS reason TEXT;
+
+-- ===== ДОБАВЛЕНИЯ К ВИТРИНАМ =====
+-- Новые поля добавляются отдельно: таблицы выше создаются только один раз,
+-- и на уже работающей базе CREATE TABLE IF NOT EXISTS их не расширит.
+
+-- Перцентили длительности: среднее и медиана скрывают «хвост» длинных
+-- звонков, а драйвер North Star в задании требует именно перцентили.
+ALTER TABLE gold_call_stats ADD COLUMN IF NOT EXISTS p75_sec INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE gold_call_stats ADD COLUMN IF NOT EXISTS p90_sec INTEGER NOT NULL DEFAULT 0;
+
+-- Активность в тексте и в звонках раздельно: в задании это два разных
+-- драйвера, и смешивать их в одном числе нельзя.
+ALTER TABLE gold_community_daily ADD COLUMN IF NOT EXISTS text_people INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE gold_community_daily ADD COLUMN IF NOT EXISTS voice_people INTEGER NOT NULL DEFAULT 0;
+
+-- Уход из сообщества: когда, по своей воле или по решению владельца,
+-- и был ли уход ранним. Из этих полей считается защитная метрика.
+ALTER TABLE gold_member_lifecycle ADD COLUMN IF NOT EXISTS left_at TIMESTAMPTZ;
+ALTER TABLE gold_member_lifecycle ADD COLUMN IF NOT EXISTS left_reason TEXT;
+ALTER TABLE gold_member_lifecycle ADD COLUMN IF NOT EXISTS early_leave BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE gold_member_lifecycle ADD COLUMN IF NOT EXISTS returned_d30 BOOLEAN NOT NULL DEFAULT false;

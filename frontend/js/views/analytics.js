@@ -132,7 +132,10 @@ export async function renderAnalytics(communityId) {
 
   const activationPercent = percent(data.activation.activated, data.activation.joined);
   const retentionPercent = percent(data.retention.returned, data.retention.eligible);
+  const retention30Percent = percent(data.retention.returned_30, data.retention.eligible_30);
   const errorPercent = percent(data.errors.failed, data.errors.total);
+  const departures = data.departures ?? { total: 0, early: 0, removed: 0, joined: 0, early_days: 7 };
+  const earlyLeavePercent = percent(departures.early, departures.joined);
 
   // Пересчёт по кнопке: ждать расписания, чтобы увидеть в статистике
   // только что отправленное сообщение, неудобно.
@@ -186,7 +189,10 @@ export async function renderAnalytics(communityId) {
             tile(
               'Вовлечены на этой неделе',
               String(data.wecu.engaged),
-              `из ${data.wecu.active} активных · порог: ${data.wecu.thresholds.messages} сообщений или ${data.wecu.thresholds.seconds / 60} мин в звонке`,
+              `из ${data.wecu.active} активных · порог: ${data.wecu.thresholds.messages} сообщений или ${data.wecu.thresholds.seconds / 60} мин в звонке` +
+                (data.wecu.messages_per_active != null
+                  ? ` · ${data.wecu.messages_per_active} сообщений на активного`
+                  : ''),
             ),
             tile(
               'Активация',
@@ -201,6 +207,20 @@ export async function renderAnalytics(communityId) {
               retentionPercent != null
                 ? `${data.retention.returned} из ${data.retention.eligible}`
                 : 'Нужны вступления старше недели',
+            ),
+            tile(
+              'Возвращаются на 30-й день',
+              retention30Percent != null ? `${retention30Percent}%` : '—',
+              retention30Percent != null
+                ? `${data.retention.returned_30} из ${data.retention.eligible_30}`
+                : 'Нужны вступления старше месяца',
+            ),
+            tile(
+              `Ушли в первые ${departures.early_days} дней`,
+              earlyLeavePercent != null ? `${earlyLeavePercent}%` : '—',
+              departures.joined > 0
+                ? `${departures.early} из ${departures.joined} вступивших · всего ушло ${departures.total}${departures.removed ? `, из них исключено ${departures.removed}` : ''}`
+                : 'Пока никто не вступал',
             ),
             tile(
               'Ошибки подключения',
@@ -230,12 +250,35 @@ export async function renderAnalytics(communityId) {
           ]),
 
           el('section', { class: 'settings-section' }, [
+            el('p', { class: 'settings-kicker', text: 'Кто активен: текст и звонки' }),
+            dayChart('Людей писало по дням', 'text_people'),
+            dayChart('Людей звонило по дням', 'voice_people'),
+            el('p', {
+              class: 'chart-axis',
+              text: 'Два драйвера North Star из задания считаются раздельно: один и тот же человек может писать, но не звонить, и наоборот.',
+            }),
+          ]),
+
+          el('section', { class: 'settings-section' }, [
             el('p', { class: 'settings-kicker', text: 'Звонки и сообщество' }),
             el('div', { class: 'tiles' }, [
               tile('Участников', String(data.totals.members)),
               tile('Сообщений всего', String(data.totals.messages)),
-              tile('Средний звонок', formatSeconds(data.durations.average), `медиана ${formatSeconds(data.durations.median)}`),
-              tile('Самый долгий', formatSeconds(data.durations.longest), `участий: ${data.durations.participations}`),
+              tile(
+                'Средний звонок',
+                formatSeconds(data.durations.average),
+                `медиана ${formatSeconds(data.durations.median)}`,
+              ),
+              tile(
+                'Длинные звонки',
+                formatSeconds(data.durations.p90),
+                `90-й перцентиль · 75-й: ${formatSeconds(data.durations.p75)}`,
+              ),
+              tile(
+                'Самый долгий',
+                formatSeconds(data.durations.longest),
+                `участий: ${data.durations.participations}`,
+              ),
             ]),
           ]),
 

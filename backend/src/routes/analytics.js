@@ -10,7 +10,7 @@ import { query } from '../db.js';
 import { asyncHandler, HttpError } from '../lib/http.js';
 import { requireAuth } from '../middleware/auth.js';
 import { parseUuid } from '../lib/validate.js';
-import { WECU_MESSAGES, WECU_SECONDS } from '../etl/gold.js';
+import { WECU_MESSAGES, WECU_SECONDS, EARLY_LEAVE_DAYS } from '../etl/gold.js';
 import { getEtlState, runEtl } from '../etl/index.js';
 
 export const analyticsRouter = Router();
@@ -49,7 +49,13 @@ async function collect(communityId) {
          count(*) FILTER (WHERE NOT is_owner AND activated_24h) AS activated,
          count(*) FILTER (WHERE NOT is_owner AND joined_at < now() - interval '7 days')
            AS eligible,
-         count(*) FILTER (WHERE NOT is_owner AND returned_d7) AS returned
+         count(*) FILTER (WHERE NOT is_owner AND returned_d7) AS returned,
+         count(*) FILTER (WHERE NOT is_owner AND joined_at < now() - interval '30 days')
+           AS eligible_30,
+         count(*) FILTER (WHERE NOT is_owner AND returned_d30) AS returned_30,
+         count(*) FILTER (WHERE NOT is_owner AND left_at IS NOT NULL) AS left_total,
+         count(*) FILTER (WHERE NOT is_owner AND early_leave) AS left_early,
+         count(*) FILTER (WHERE NOT is_owner AND left_reason = 'removed') AS removed
        FROM gold_member_lifecycle WHERE community_id = $1`,
       [communityId],
     ),
@@ -60,7 +66,9 @@ async function collect(communityId) {
               COALESCE(g.messages, 0) AS messages,
               COALESCE(g.call_participations, 0) AS calls,
               COALESCE(g.call_seconds, 0) AS seconds,
-              COALESCE(g.active_people, 0) AS people
+              COALESCE(g.active_people, 0) AS people,
+              COALESCE(g.text_people, 0) AS text_people,
+              COALESCE(g.voice_people, 0) AS voice_people
        FROM generate_series(
               now()::date - ($2::int - 1) * interval '1 day', now()::date, interval '1 day'
             ) AS series
@@ -106,6 +114,14 @@ async function collect(communityId) {
       active: toNumber(wecuRow.active_people),
       week_start: wecuRow.week_start ?? null,
       thresholds: { messages: WECU_MESSAGES, seconds: WECU_SECONDS },
+      messages: toNumber(wecuRow.messages),
+      // Драйвер из задания: сколько сообщений приходится на активного
+      // человека. Считаем здесь, а не в витрине: это простое деление
+      // двух уже посчитанных чисел.
+      messages_per_active:
+        toNumber(wecuRow.active_people) > 0
+          ? Math.round((toNumber(wecuRow.messages) / toNumber(wecuRow.active_people)) * 10) / 10
+          : null,
     },
     activation: {
       activated: toNumber(lifecycle.rows[0].activated),
@@ -114,6 +130,17 @@ async function collect(communityId) {
     retention: {
       returned: toNumber(lifecycle.rows[0].returned),
       eligible: toNumber(lifecycle.rows[0].eligible),
+      returned_30: toNumber(lifecycle.rows[0].returned_30),
+      eligible_30: toNumber(lifecycle.rows[0].eligible_30),
+    },
+    // Защитная метрика из задания: сколько людей ушло и сколько из них —
+    // в первые дни после вступления.
+    departures: {
+      total: toNumber(lifecycle.rows[0].left_total),
+      early: toNumber(lifecycle.rows[0].left_early),
+      removed: toNumber(lifecycle.rows[0].removed),
+      joined: toNumber(lifecycle.rows[0].joined),
+      early_days: EARLY_LEAVE_DAYS,
     },
     daily: daily.rows.map((row) => ({
       day: row.day,
@@ -121,11 +148,15 @@ async function collect(communityId) {
       calls: toNumber(row.calls),
       seconds: toNumber(row.seconds),
       people: toNumber(row.people),
+      text_people: toNumber(row.text_people),
+      voice_people: toNumber(row.voice_people),
     })),
     durations: {
       participations: toNumber(callRow.participations),
       average: toNumber(callRow.avg_sec),
       median: toNumber(callRow.median_sec),
+      p75: toNumber(callRow.p75_sec),
+      p90: toNumber(callRow.p90_sec),
       longest: toNumber(callRow.longest_sec),
     },
     totals: {

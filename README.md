@@ -116,6 +116,8 @@ tar xzf livekit.tar.gz && ./livekit-server --dev
 | GET | `/communities/:id/members` | да, участник | Состав сообщества: имя, роль, дата вступления |
 | PATCH | `/communities/:id` | да, **владелец** | Переименование сообщества (до 60 символов) |
 | POST | `/communities/:id/channels` | да, **владелец** | Создаёт текстовый или голосовой канал (до 20 каналов на сообщество) |
+| DELETE | `/communities/:id/members/me` | да, участник | Выход из сообщества. Владельцу закрыт: передачи прав пока нет |
+| DELETE | `/communities/:id/members/:userId` | да, **владелец** | Исключает участника |
 | GET | `/communities/:id/analytics` | да, **владелец** | Метрики сообщества из витрин Gold: воронка, WECU, активация, ретеншен, ошибки, активность по дням, длительности |
 | POST | `/communities/:id/analytics/refresh` | да, **владелец** | Прогоняет ETL (Bronze → Silver → Gold) и отдаёт пересчитанные метрики |
 | POST | `/invites` | да, участник | Создаёт инвайт (`expires_at`, `max_uses` — опционально) |
@@ -145,7 +147,9 @@ tar xzf livekit.tar.gz && ./livekit-server --dev
 Bronze-слоя.
 
 События: `invite_link_opened`, `call_joined`, `registration_completed`,
-`community_joined`, `message_sent`, `call_participated`.
+`community_joined`, `message_sent`, `call_participated` — шесть из
+спецификации, плюс седьмое `community_left` (уход или исключение): без него
+нечем измерять защитную метрику «доля раннего покидания».
 
 Сбой записи события логируется, но не ломает пользовательский сценарий.
 
@@ -255,7 +259,7 @@ PGHOST=localhost PGUSER=postgres PGPASSWORD=postgres ./scripts/e2e-test.sh
 cd backend && node scripts/ws-test.mjs
 ```
 
-Граничные случаи и правила доступа — 30 проверок: кто куда не должен
+Граничные случаи и правила доступа — 36 проверок: кто куда не должен
 попадать, что происходит с исчерпанным приглашением, чужим участием
 в звонке, слишком длинным сообщением, битым JSON и перебором кода входа:
 

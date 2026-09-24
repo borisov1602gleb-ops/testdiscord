@@ -4,6 +4,7 @@ import { Router } from 'express';
 import { query, withTransaction } from '../db.js';
 import { asyncHandler, HttpError } from '../lib/http.js';
 import { requireAuth } from '../middleware/auth.js';
+import { logEvent, EVENT_TYPES } from '../lib/events.js';
 import { requireMembership } from '../lib/access.js';
 import { parseUuid } from '../lib/validate.js';
 import { PUBLIC_NAME_SQL } from '../lib/users.js';
@@ -163,5 +164,54 @@ communitiesRouter.post(
       [communityId, name, type],
     );
     res.status(201).json({ channel: rows[0] });
+  }),
+);
+
+// Удаление участника: себя — любой, кроме владельца; другого — только
+// владелец. Владелец уйти не может: сообщество осталось бы без хозяина,
+// а передачи прав в MVP нет.
+async function removeMember({ actorId, communityId, targetId, res }) {
+  const actorRole = await requireMembership(actorId, communityId);
+  const isSelf = actorId === targetId;
+
+  if (!isSelf && actorRole !== 'owner') throw new HttpError(403, 'owner_only');
+  if (isSelf && actorRole === 'owner') throw new HttpError(400, 'owner_cannot_leave');
+
+  const { rows } = await query(
+    `DELETE FROM community_members
+     WHERE community_id = $1 AND user_id = $2 AND role <> 'owner'
+     RETURNING id`,
+    [communityId, targetId],
+  );
+  if (rows.length === 0) throw new HttpError(404, 'member_not_found');
+
+  // Сообщения и участие в звонках остаются: история сообщества не должна
+  // рассыпаться из-за того, что человек ушёл.
+  await logEvent(EVENT_TYPES.COMMUNITY_LEFT, {
+    user_id: targetId,
+    community_id: communityId,
+    reason: isSelf ? 'left' : 'removed',
+    removed_by: isSelf ? null : actorId,
+  });
+
+  res.json({ left: true, reason: isSelf ? 'left' : 'removed' });
+}
+
+communitiesRouter.delete(
+  '/:id/members/me',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const communityId = parseUuid(req.params.id, 'community_id');
+    await removeMember({ actorId: req.user.id, communityId, targetId: req.user.id, res });
+  }),
+);
+
+communitiesRouter.delete(
+  '/:id/members/:userId',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const communityId = parseUuid(req.params.id, 'community_id');
+    const targetId = parseUuid(req.params.userId, 'user_id');
+    await removeMember({ actorId: req.user.id, communityId, targetId, res });
   }),
 );

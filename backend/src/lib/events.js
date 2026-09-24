@@ -10,6 +10,9 @@ export const EVENT_TYPES = {
   CALL_JOINED: 'call_joined',
   REGISTRATION_COMPLETED: 'registration_completed',
   COMMUNITY_JOINED: 'community_joined',
+  // Седьмое событие, сверх шести из спецификации: без него нечем измерять
+  // защитную метрику «доля раннего покидания сообщества».
+  COMMUNITY_LEFT: 'community_left',
   MESSAGE_SENT: 'message_sent',
   CALL_PARTICIPATED: 'call_participated',
 };
