@@ -246,6 +246,63 @@ check "картинка без подписи отправляется" 201 \
 check "одно вложение — одно сообщение" 400 \
   "$(status POST "$API/messages" "{\"channel_id\":\"$TEXT\",\"attachment_id\":\"$ATT_ID\"}" "$OWNER")"
 
+echo '--- треды, закреплённые, поиск, переход к сообщению ---'
+ROOT="$(send "$OWNER" "{\"channel_id\":\"$TEXT\",\"content\":\"Корень треда про дедлайн\"}")"
+check "ответ в тред" 201 \
+  "$(status POST "$API/messages" "{\"channel_id\":\"$TEXT\",\"content\":\"в треде\",\"thread_id\":\"$ROOT\"}" "$CHATTER")"
+THREAD_MSG="$(jq -r .message.id "$TMP/out.json")"
+check "тред внутри треда не создаётся" 400 \
+  "$(status POST "$API/messages" "{\"channel_id\":\"$TEXT\",\"content\":\"глубже\",\"thread_id\":\"$THREAD_MSG\"}" "$OWNER")"
+check "сообщения треда не попадают в общую ленту" 0 \
+  "$(curl -sf "$API/messages?channel_id=$TEXT" -H "authorization: Bearer $OWNER" \
+     | jq --arg id "$THREAD_MSG" '[.messages[]|select(.id==$id)]|length')"
+check "у корня виден счётчик ответов" 1 \
+  "$(curl -sf "$API/messages?channel_id=$TEXT" -H "authorization: Bearer $OWNER" \
+     | jq --arg id "$ROOT" '.messages[]|select(.id==$id)|.thread_count')"
+check "тред читается целиком" 1 \
+  "$(curl -sf "$API/messages?channel_id=$TEXT&thread_id=$ROOT" -H "authorization: Bearer $OWNER" | jq '.messages|length')"
+check "посторонний тред не читает" 403 "$(status GET "$API/messages?channel_id=$TEXT&thread_id=$ROOT" '' "$OUTSIDER")"
+check "участник не закрепляет в сообществе" 403 "$(status PUT "$API/messages/$ROOT/pin" '{"pinned":true}' "$CHATTER")"
+check "владелец закрепляет" 200 "$(status PUT "$API/messages/$ROOT/pin" '{"pinned":true}' "$OWNER")"
+check "закреплённое видно в списке" "$ROOT" \
+  "$(curl -sf "$API/messages/pinned?channel_id=$TEXT" -H "authorization: Bearer $CHATTER" | jq -r '.messages[0].id')"
+check "сообщение треда не закрепляется" 400 "$(status PUT "$API/messages/$THREAD_MSG/pin" '{"pinned":true}' "$OWNER")"
+check "поиск находит по слову" "$ROOT" \
+  "$(curl -sf "$API/messages/search?community_id=$CID&q=%D0%B4%D0%B5%D0%B4%D0%BB%D0%B0%D0%B9%D0%BD" \
+     -H "authorization: Bearer $CHATTER" | jq -r '.messages[0].id')"
+check "символ % в поиске — не шаблон" 0 \
+  "$(curl -sf "$API/messages/search?community_id=$CID&q=%25%25" -H "authorization: Bearer $OWNER" | jq '.messages|length')"
+check "слишком короткий запрос" 400 "$(status GET "$API/messages/search?community_id=$CID&q=a" '' "$OWNER")"
+check "посторонний не ищет в сообществе" 403 \
+  "$(status GET "$API/messages/search?community_id=$CID&q=%D0%B4%D0%B5%D0%B4" '' "$OUTSIDER")"
+check "переход к старому сообщению" true \
+  "$(curl -sf "$API/messages?channel_id=$TEXT&around=$OLDEST" -H "authorization: Bearer $OWNER" \
+     | jq --arg id "$OLDEST" '(.messages|map(.id)|index($id)) != null')"
+
+echo '--- личные сообщения ---'
+check "написать себе нельзя" 400 "$(status POST "$API/direct" "{\"user_id\":\"$CHATTER_ID\"}" "$CHATTER")"
+check "без общего сообщества личка не открывается" 403 \
+  "$(status POST "$API/direct" "{\"user_id\":\"$CHATTER_ID\"}" "$OUTSIDER")"
+check "переписка создаётся" 201 "$(status POST "$API/direct" "{\"user_id\":\"$CHATTER_ID\"}" "$OWNER")"
+DM="$(jq -r .conversation.id "$TMP/out.json")"
+check "повторно — та же переписка" "$DM" \
+  "$(curl -sf -X POST "$API/direct" -H 'content-type: application/json' -H "authorization: Bearer $CHATTER" \
+     -d "{\"user_id\":\"$(curl -sf "$API/users/me" -H "authorization: Bearer $OWNER" | jq -r .user.id)\"}" | jq -r .conversation.id)"
+check "сообщение в личку" 201 "$(status POST "$API/messages" "{\"channel_id\":\"$DM\",\"content\":\"лично тебе\"}" "$OWNER")"
+check "у собеседника непрочитанное" 1 \
+  "$(curl -sf "$API/direct" -H "authorization: Bearer $CHATTER" | jq --arg id "$DM" '.conversations[]|select(.id==$id)|.unread')"
+check "посторонний личку не читает" 403 "$(status GET "$API/messages?channel_id=$DM" '' "$OUTSIDER")"
+check "посторонний в личку не пишет" 403 \
+  "$(status POST "$API/messages" "{\"channel_id\":\"$DM\",\"content\":\"влез\"}" "$OUTSIDER")"
+check "в личке закрепить может любой из двоих" 200 \
+  "$(status PUT "$API/messages/$(jq -r .message.id <<< "$(curl -sf -X POST "$API/messages" -H 'content-type: application/json' \
+     -H "authorization: Bearer $CHATTER" -d "{\"channel_id\":\"$DM\",\"content\":\"закрепи\"}")")/pin" '{"pinned":true}' "$CHATTER")"
+check "файл в личку по channel_id" 201 \
+  "$(curl -s -o "$TMP/out.json" -w '%{http_code}' -X POST "$API/attachments?channel_id=$DM&filename=pic.png" \
+     -H "authorization: Bearer $OWNER" -H 'content-type: image/png' --data-binary @"$TMP/pic.png")"
+check "личка не видна в каналах сообщества" 0 \
+  "$(curl -sf "$API/communities/$CID" -H "authorization: Bearer $OWNER" | jq '[.channels[]|select(.type=="direct")]|length')"
+
 echo '--- вход по коду ---'
 BRUTE="edge-brute-$S@example.com"
 REAL="$(curl -sf -X POST "$API/auth/send-code" -H 'content-type: application/json' \

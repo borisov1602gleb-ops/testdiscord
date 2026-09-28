@@ -123,6 +123,31 @@ const ICONS = {
       ['path', { d: 'M1 8.6l3 3 7-7.2M7.6 11.2l.4.4 7-7.2', stroke: 'currentColor', 'stroke-width': 1.5, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }],
     ],
   },
+  search: {
+    box: 16,
+    shapes: [
+      ['circle', { cx: 7, cy: 7, r: 4.6, stroke: 'currentColor', 'stroke-width': 1.4 }],
+      ['path', { d: 'M10.5 10.5L14 14', stroke: 'currentColor', 'stroke-width': 1.5, 'stroke-linecap': 'round' }],
+    ],
+  },
+  pin: {
+    box: 16,
+    shapes: [
+      ['path', { d: 'M5.8 2h4.4l-.7 4.1 2.3 2.3H4.2l2.3-2.3zM8 8.4V14', stroke: 'currentColor', 'stroke-width': 1.3, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }],
+    ],
+  },
+  thread: {
+    box: 16,
+    shapes: [
+      ['path', { d: 'M2.2 3h8.2v5.8H5.8L3.4 10.8V8.8H2.2zM12.6 5.8h1.2v5.6h-1.2v1.8l-2.2-1.8H7', stroke: 'currentColor', 'stroke-width': 1.3, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }],
+    ],
+  },
+  chat: {
+    box: 16,
+    shapes: [
+      ['path', { d: 'M2.4 3h11.2v7.8H7.2L4.2 13.4v-2.6H2.4z', stroke: 'currentColor', 'stroke-width': 1.3, 'stroke-linejoin': 'round' }],
+    ],
+  },
   alert: {
     box: 18,
     shapes: [

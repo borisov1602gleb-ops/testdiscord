@@ -2,7 +2,7 @@
 // доступны гостю без входа — на них держится сценарий «пришёл по ссылке».
 import { store } from './store.js';
 import { renderLogin } from './views/login.js';
-import { renderHome, disconnectRealtime } from './views/home.js';
+import { renderHome, renderDirect, disconnectRealtime } from './views/home.js';
 import { renderInvite } from './views/invite.js';
 import { renderCall } from './views/call.js';
 import { renderSettings } from './views/settings.js';
@@ -19,6 +19,8 @@ const routes = [
   { pattern: /^#\/c\/([\w-]+)\/analytics$/, view: (id) => renderAnalytics(id) },
   { pattern: /^#\/c\/([\w-]+)\/settings$/, view: (id) => renderCommunity(id) },
   { pattern: /^#\/c\/([\w-]+)$/, view: (id) => renderHome(id) },
+  { pattern: /^#\/dm\/([\w-]+)$/, view: (id) => renderDirect(id) },
+  { pattern: /^#\/dm$/, view: () => renderDirect(null) },
   { pattern: /^#\/?$/, view: () => renderHome(null) },
 ];
 

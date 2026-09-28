@@ -20,6 +20,7 @@ import { invitesRouter } from './routes/invites.js';
 import { callsRouter } from './routes/calls.js';
 import { messagesRouter } from './routes/messages.js';
 import { channelsRouter } from './routes/channels.js';
+import { directRouter } from './routes/direct.js';
 import { attachmentsRouter } from './routes/attachments.js';
 
 export const app = express();
@@ -57,6 +58,7 @@ app.use('/invites', invitesRouter);
 app.use('/calls', callsRouter);
 app.use('/messages', messagesRouter);
 app.use('/channels', channelsRouter);
+app.use('/direct', directRouter);
 app.use('/attachments', attachmentsRouter);
 
 app.use((_req, res) => res.status(404).json({ error: 'not_found' }));
