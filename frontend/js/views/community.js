@@ -5,7 +5,8 @@
 // назначает модераторов и переименовывает сообщество. Права проверяет
 // сервер, интерфейс лишь не показывает лишнего.
 import { api } from '../api.js';
-import { el, mount, icon, initial } from '../dom.js';
+import { el, mount, icon } from '../dom.js';
+import { avatarNode, pickAndUploadAvatar } from '../avatar.js';
 import { navigate } from '../router.js';
 import { showInviteModal } from './home.js';
 import {
@@ -24,9 +25,10 @@ const ROLE_ABILITIES = [
   ['Закреплять сообщения', false, true, true],
   ['Создавать каналы', false, true, true],
   ['Создавать теги и выставлять их участникам', false, true, true],
-  ['Исключать участников (кроме модераторов и владельца)', false, true, true],
+  ['Исключать и банить участников (кроме модераторов и владельца)', false, true, true],
+  ['Разбирать жалобы на сообщения', false, true, true],
   ['Назначать и снимать модераторов', false, false, true],
-  ['Переименовывать сообщество', false, false, true],
+  ['Переименовывать сообщество и менять его аватарку', false, false, true],
   ['Смотреть аналитику', false, false, true],
 ];
 
@@ -372,6 +374,68 @@ export async function renderCommunity(communityId) {
     }
   }
 
+  async function banMember(member, button) {
+    try {
+      await api(`/communities/${communityId}/bans`, { method: 'POST', body: { user_id: member.id } });
+      members = members.filter((m) => m.id !== member.id);
+      drawMembers();
+      await loadBans();
+    } catch (err) {
+      button.disabled = false;
+      button.textContent = err.message;
+    }
+  }
+
+  // ===== баны =====
+  const bansSection = el('section', { class: 'settings-section' });
+  let bans = [];
+
+  async function loadBans() {
+    if (!canKick) return;
+    try {
+      ({ bans } = await api(`/communities/${communityId}/bans`));
+    } catch {
+      bans = [];
+    }
+    drawBans();
+  }
+
+  function drawBans() {
+    if (!canKick) return;
+    bansSection.replaceChildren(
+      el('p', { class: 'settings-kicker', text: `Баны · ${bans.length}` }),
+      ...(bans.length
+        ? bans.map((ban) =>
+          el('div', { class: 'settings-row' }, [
+            avatarNode(ban.name, null, 'user-avatar'),
+            el('div', { class: 'member-info' }, [
+              el('p', { class: 'row-title', text: ban.name }),
+              el('p', {
+                class: 'row-note',
+                text: `С ${formatDate(ban.created_at)}${ban.banned_by_name ? `, забанил(а) ${ban.banned_by_name}` : ''}${ban.reason ? ` — «${ban.reason}»` : ''}`,
+              }),
+            ]),
+            el('div', { class: 'row-actions' }, [
+              confirmingButton({
+                label: 'Разбанить',
+                confirmLabel: 'Точно разбанить?',
+                className: 'btn btn-ghost btn-sm',
+                onConfirm: async (button) => {
+                  try {
+                    await api(`/communities/${communityId}/bans/${ban.user_id}`, { method: 'DELETE' });
+                    await loadBans();
+                  } catch (err) {
+                    button.disabled = false;
+                    button.textContent = err.message;
+                  }
+                },
+              }),
+            ]),
+          ]))
+        : [el('p', { class: 'row-note', text: 'Забаненных нет. Забаненный не может вернуться ни по какой ссылке, пока его не разбанят.' })]),
+    );
+  }
+
   async function changeRole(member, select) {
     select.disabled = true;
     try {
@@ -467,7 +531,7 @@ export async function renderCommunity(communityId) {
 
     return el('div', { class: 'member-card' }, [
       el('div', { class: 'settings-row' }, [
-        el('div', { class: 'user-avatar', text: initial(member.name) }),
+        avatarNode(member.name, member.avatar_url, 'user-avatar'),
         el('div', { class: 'member-info' }, [
           el('p', { class: 'row-title', text: member.name }),
           el('p', { class: 'row-note', text: `В сообществе с ${formatDate(member.joined_at)}` }),
@@ -495,6 +559,14 @@ export async function renderCommunity(communityId) {
               className: 'btn btn-ghost btn-sm',
               onConfirm: (button) => removeMember(member, button),
             }),
+          // Бан строже исключения: по ссылке больше не вернуться.
+          canKick && outranks &&
+            confirmingButton({
+              label: 'Забанить',
+              confirmLabel: 'Забанить навсегда?',
+              className: 'btn btn-ghost btn-sm btn-ghost-danger',
+              onConfirm: (button) => banMember(member, button),
+            }),
         ]),
       ]),
       tagEditorFor === member.id && tagEditor(member),
@@ -508,6 +580,7 @@ export async function renderCommunity(communityId) {
 
   drawTags();
   drawMembers();
+  loadBans();
 
   // ===== уход из сообщества =====
   const leaveNote = el('p', { class: 'field-error' });
@@ -524,6 +597,25 @@ export async function renderCommunity(communityId) {
   }
 
   const title = el('h1', { class: 'settings-title', text: community.name });
+  const communityAvatar = el('div', { class: 'avatar-slot' });
+  const drawCommunityAvatar = () => communityAvatar.replaceChildren(
+    avatarNode(community.name, community.avatar_url, 'user-avatar avatar-large'),
+  );
+  drawCommunityAvatar();
+  const avatarNote = el('p', { class: 'saved-note' });
+
+  async function changeCommunityAvatar() {
+    try {
+      const result = await pickAndUploadAvatar(`/communities/${communityId}/avatar`);
+      if (!result) return;
+      community = { ...community, avatar_url: result.avatar_url };
+      drawCommunityAvatar();
+      avatarNote.textContent = 'Аватарка сообщества обновлена';
+    } catch (err) {
+      avatarNote.className = 'field-error';
+      avatarNote.textContent = err.message;
+    }
+  }
   const manages = canManageTags || canRename;
 
   const rolesTable = el('table', { class: 'roles-table' }, [
@@ -581,7 +673,15 @@ export async function renderCommunity(communityId) {
         el('div', { class: 'settings-body' }, [
           canRename &&
             el('section', { class: 'settings-section' }, [
-              el('p', { class: 'settings-kicker', text: 'Название' }),
+              el('p', { class: 'settings-kicker', text: 'Название и аватарка' }),
+              el('div', { class: 'settings-row' }, [
+                communityAvatar,
+                el('p', { class: 'row-note', text: 'Показывается в списке сообществ слева' }),
+                el('div', { class: 'row-actions' }, [
+                  el('button', { class: 'btn btn-secondary btn-sm', type: 'button', text: 'Сменить аватарку', onclick: changeCommunityAvatar }),
+                ]),
+              ]),
+              avatarNote,
               el('div', { class: 'field' }, [
                 el('label', {
                   class: 'field-label',
@@ -650,6 +750,8 @@ export async function renderCommunity(communityId) {
 
           membersKicker,
           membersSection,
+
+          canKick && bansSection,
 
           el('section', { class: 'settings-section' }, [
             el('p', { class: 'settings-kicker', text: 'Роли — кто что может' }),

@@ -22,6 +22,9 @@ import { messagesRouter } from './routes/messages.js';
 import { channelsRouter } from './routes/channels.js';
 import { directRouter } from './routes/direct.js';
 import { attachmentsRouter } from './routes/attachments.js';
+import { moderationRouter } from './routes/moderation.js';
+import { pollsRouter } from './routes/polls.js';
+import { previewsRouter } from './routes/previews.js';
 
 export const app = express();
 // На этапе MVP клиент и API живут на одном адресе, поэтому cors() открыт
@@ -54,12 +57,15 @@ app.use('/auth', authRouter);
 app.use('/users', usersRouter);
 app.use('/communities', analyticsRouter);
 app.use('/communities', communitiesRouter);
+app.use('/communities', moderationRouter);
 app.use('/invites', invitesRouter);
 app.use('/calls', callsRouter);
 app.use('/messages', messagesRouter);
 app.use('/channels', channelsRouter);
 app.use('/direct', directRouter);
 app.use('/attachments', attachmentsRouter);
+app.use('/polls', pollsRouter);
+app.use('/link-preview', previewsRouter);
 
 app.use((_req, res) => res.status(404).json({ error: 'not_found' }));
 app.use(errorHandler);

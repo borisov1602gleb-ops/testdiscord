@@ -5,6 +5,7 @@ import { query } from '../db.js';
 import { asyncHandler, HttpError } from '../lib/http.js';
 import { requireAuth } from '../middleware/auth.js';
 import { getProfile } from '../lib/users.js';
+import { rawBody, contentTypeOf, saveUpload, IMAGE_TYPES } from './attachments.js';
 
 export const usersRouter = Router();
 
@@ -40,6 +41,40 @@ usersRouter.patch(
       [req.user.id, displayName === undefined ? null : displayName.trim(), hideEmail ?? null],
     );
 
+    res.json({ user: await getProfile(req.user.id) });
+  }),
+);
+
+// Аватарка. Браузер заранее ужимает картинку до квадрата 256×256, поэтому
+// лимит небольшой: большой файл — признак того, что его прислали в обход
+// интерфейса.
+const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
+
+usersRouter.post(
+  '/me/avatar',
+  requireAuth,
+  rawBody(AVATAR_MAX_BYTES),
+  asyncHandler(async (req, res) => {
+    const mimeType = contentTypeOf(req);
+    if (!IMAGE_TYPES.has(mimeType)) {
+      throw new HttpError(415, 'unsupported_file_type', { allowed: [...IMAGE_TYPES] });
+    }
+    const file = await saveUpload({
+      buffer: req.body,
+      mimeType,
+      filename: 'avatar',
+      uploaderId: req.user.id,
+    });
+    await query('UPDATE users SET avatar_id = $2 WHERE id = $1', [req.user.id, file.id]);
+    res.json({ user: await getProfile(req.user.id) });
+  }),
+);
+
+usersRouter.delete(
+  '/me/avatar',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    await query('UPDATE users SET avatar_id = NULL WHERE id = $1', [req.user.id]);
     res.json({ user: await getProfile(req.user.id) });
   }),
 );

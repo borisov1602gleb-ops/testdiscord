@@ -9,6 +9,7 @@ import { getChannel, requireChannelAccess } from '../lib/access.js';
 import { parseUuid } from '../lib/validate.js';
 import { isOnline } from '../lib/realtime.js';
 import { PUBLIC_NAME_SQL } from '../lib/users.js';
+import { avatarUrl } from '../lib/signed-urls.js';
 
 export const directRouter = Router();
 
@@ -20,7 +21,7 @@ const SNIPPET_LENGTH = 80;
 async function listConversations(userId, channelId = null) {
   const { rows } = await query(
     `SELECT ch.id, ch.created_at,
-            other.user_id AS other_id, ${PUBLIC_NAME_SQL} AS other_name,
+            other.user_id AS other_id, ${PUBLIC_NAME_SQL} AS other_name, u.avatar_id AS other_avatar_id,
             last.content AS last_content, last.created_at AS last_at,
             last.user_id AS last_user_id, last.deleted_at IS NOT NULL AS last_deleted,
             last.has_attachment AS last_has_attachment,
@@ -46,7 +47,12 @@ async function listConversations(userId, channelId = null) {
   );
   return rows.map((row) => ({
     id: row.id,
-    user: { id: row.other_id, name: row.other_name, online: isOnline(row.other_id) },
+    user: {
+      id: row.other_id,
+      name: row.other_name,
+      avatar_url: avatarUrl(row.other_avatar_id),
+      online: isOnline(row.other_id),
+    },
     last_message: row.last_at
       ? {
         from_me: row.last_user_id === userId,

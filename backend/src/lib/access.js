@@ -54,7 +54,8 @@ export const ROLE_RANK = { member: 0, moderator: 1, owner: 2 };
 export const PERMISSIONS = {
   delete_any_message: 'moderator', // удалять чужие сообщения
   pin_messages: 'moderator',       // закреплять
-  kick_members: 'moderator',       // исключать тех, кто младше по роли
+  kick_members: 'moderator',       // исключать и банить тех, кто младше по роли
+  handle_reports: 'moderator',     // разбирать жалобы на сообщения
   manage_tags: 'moderator',        // создавать теги и выставлять их участникам
   manage_channels: 'moderator',    // создавать каналы
   manage_roles: 'owner',           // назначать и снимать модераторов
