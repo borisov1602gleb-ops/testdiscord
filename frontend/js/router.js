@@ -18,6 +18,8 @@ const routes = [
   // шаблон #/c/:id перехватил бы адрес.
   { pattern: /^#\/c\/([\w-]+)\/analytics$/, view: (id) => renderAnalytics(id) },
   { pattern: /^#\/c\/([\w-]+)\/settings$/, view: (id) => renderCommunity(id) },
+  // Ссылка сразу на канал — из уведомления браузера.
+  { pattern: /^#\/c\/([\w-]+)\/ch\/([\w-]+)$/, view: (id, channelId) => renderHome(id, channelId) },
   { pattern: /^#\/c\/([\w-]+)$/, view: (id) => renderHome(id) },
   { pattern: /^#\/dm\/([\w-]+)$/, view: (id) => renderDirect(id) },
   { pattern: /^#\/dm$/, view: () => renderDirect(null) },

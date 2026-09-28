@@ -10,6 +10,7 @@ const DEFAULTS = {
   joinMuted: false,
   soundOnMessage: true,
   soundOnJoin: true,
+  browserNotifications: false,
 };
 
 function read() {

@@ -23,13 +23,16 @@ const ROLE_ABILITIES = [
   ['Приглашать людей по ссылке', true, true, true],
   ['Удалять чужие сообщения', false, true, true],
   ['Закреплять сообщения', false, true, true],
-  ['Создавать каналы', false, true, true],
+  ['Создавать каналы, делать их закрытыми или «только для чтения»', false, true, true],
+  ['Писать в каналы «только для чтения»', false, true, true],
+  ['Видеть все закрытые каналы', false, true, true],
   ['Создавать теги и выставлять их участникам', false, true, true],
   ['Исключать и банить участников (кроме модераторов и владельца)', false, true, true],
   ['Разбирать жалобы на сообщения', false, true, true],
   ['Назначать и снимать модераторов', false, false, true],
   ['Переименовывать сообщество и менять его аватарку', false, false, true],
   ['Смотреть аналитику', false, false, true],
+  ['Передать права владельца другому участнику', false, false, true],
 ];
 
 // Опасное действие подтверждается вторым нажатием на ту же кнопку:
@@ -177,21 +180,130 @@ export async function renderCommunity(communityId) {
   // должен обновиться вместе со списком, а не остаться прежним.
   const channelsKicker = el('p', { class: 'settings-kicker' });
 
+  let editingChannelId = null;
+
+  function channelNoteText(channel) {
+    const parts = [channel.type === 'voice' ? 'Голосовой канал' : 'Текстовый канал'];
+    if (channel.is_private) {
+      const names = tags.filter((t) => channel.allowed_tag_ids?.includes(t.id)).map((t) => t.name);
+      parts.push(names.length
+        ? `закрытый: видят модераторы и теги ${names.join(', ')}`
+        : 'закрытый: видят только владелец и модераторы');
+    }
+    if (channel.read_only) parts.push('только для чтения — пишут модераторы');
+    return parts.join(' · ');
+  }
+
+  // Настройки доступа к каналу — общие для создания и правки: закрытый
+  // (и для каких тегов), «только для чтения» (только у текстовых).
+  function accessFields(initial = {}, getType = () => initial.type ?? 'text') {
+    const isPrivate = el('input', { type: 'checkbox' });
+    const readOnly = el('input', { type: 'checkbox' });
+    isPrivate.checked = Boolean(initial.is_private);
+    readOnly.checked = Boolean(initial.read_only);
+    const chosen = new Set(initial.allowed_tag_ids ?? []);
+    const tagPicker = el('div', { class: 'tag-picker' });
+    const readOnlyRow = el('label', { class: 'check' }, [
+      readOnly,
+      el('span', { text: 'Только для чтения — писать могут владелец и модераторы (например, «Объявления»)' }),
+    ]);
+    function draw() {
+      tagPicker.hidden = !isPrivate.checked;
+      tagPicker.replaceChildren(
+        el('span', { class: 'row-note', text: tags.length ? 'Кому ещё открыт, кроме модераторов:' : 'Создайте теги ниже, чтобы открыть канал части участников' }),
+        ...tags.map((tag) => tagChip(tag, {
+          active: chosen.has(tag.id),
+          onclick: () => {
+            if (chosen.has(tag.id)) chosen.delete(tag.id);
+            else chosen.add(tag.id);
+            draw();
+          },
+        })),
+      );
+      readOnlyRow.hidden = getType() !== 'text';
+    }
+    isPrivate.addEventListener('change', draw);
+    draw();
+    return {
+      node: el('div', { class: 'channel-access' }, [
+        el('label', { class: 'check' }, [
+          isPrivate,
+          el('span', { text: 'Закрытый — видят владелец, модераторы и участники с выбранными тегами' }),
+        ]),
+        tagPicker,
+        readOnlyRow,
+      ]),
+      redraw: draw,
+      value: () => ({
+        is_private: isPrivate.checked,
+        allowed_tag_ids: isPrivate.checked ? [...chosen] : [],
+        read_only: getType() === 'text' && readOnly.checked,
+      }),
+    };
+  }
+
+  function channelEditRow(channel) {
+    const nameField = el('input', { class: 'input', type: 'text', maxlength: '40', value: channel.name });
+    const access = accessFields(channel);
+    const error = el('p', { class: 'field-error' });
+    async function save() {
+      try {
+        const { channel: updated } = await api(`/communities/${communityId}/channels/${channel.id}`, {
+          method: 'PATCH',
+          body: { name: nameField.value.trim(), ...access.value() },
+        });
+        channels = channels.map((c) => (c.id === updated.id ? updated : c));
+        editingChannelId = null;
+        drawChannels();
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    }
+    return el('form', { class: 'settings-row tag-edit', onsubmit: (e) => (e.preventDefault(), save()) }, [
+      el('div', { class: 'tag-edit-fields' }, [nameField, access.node, error]),
+      el('div', { class: 'row-actions' }, [
+        el('button', {
+          class: 'btn btn-ghost btn-sm',
+          type: 'button',
+          text: 'Отмена',
+          onclick: () => {
+            editingChannelId = null;
+            drawChannels();
+          },
+        }),
+        el('button', { class: 'btn btn-primary btn-sm', type: 'submit', text: 'Сохранить' }),
+      ]),
+    ]);
+  }
+
   function drawChannels() {
     channelsKicker.textContent = `Каналы · ${channels.length}`;
     channelList.replaceChildren(
-      ...channels.map((channel) =>
-        el('div', { class: 'settings-row' }, [
+      ...channels.map((channel) => (channel.id === editingChannelId
+        ? channelEditRow(channel)
+        : el('div', { class: 'settings-row' }, [
           channel.type === 'voice' ? icon('speaker', 18) : el('span', { class: 'chan-hash', text: '#' }),
-          el('div', {}, [
-            el('p', { class: 'row-title', text: channel.name }),
-            el('p', {
-              class: 'row-note',
-              text: channel.type === 'voice' ? 'Голосовой канал' : 'Текстовый канал',
-            }),
+          el('div', { class: 'member-info' }, [
+            el('p', { class: 'row-title' }, [
+              channel.name,
+              channel.is_private && el('span', { class: 'chan-flag' }, [icon('lock', 13)]),
+              channel.read_only && el('span', { class: 'chan-flag' }, [icon('megaphone', 13)]),
+            ]),
+            el('p', { class: 'row-note', text: channelNoteText(channel) }),
           ]),
-        ]),
-      ),
+          canManageChannels &&
+            el('div', { class: 'row-actions' }, [
+              el('button', {
+                class: 'btn btn-ghost btn-sm',
+                type: 'button',
+                text: 'Изменить',
+                onclick: () => {
+                  editingChannelId = channel.id;
+                  drawChannels();
+                },
+              }),
+            ]),
+        ]))),
     );
   }
   drawChannels();
@@ -211,6 +323,8 @@ export async function renderCommunity(communityId) {
       el('option', { value: 'voice', text: 'Голосовой' }),
     ],
   );
+  const newChannelAccess = accessFields({}, () => newChannelType.value);
+  newChannelType.addEventListener('change', () => newChannelAccess.redraw());
   const channelNote = el('p', { class: 'saved-note' });
 
   async function addChannel() {
@@ -221,7 +335,7 @@ export async function renderCommunity(communityId) {
     try {
       const { channel } = await api(`/communities/${communityId}/channels`, {
         method: 'POST',
-        body: { name, type: newChannelType.value },
+        body: { name, type: newChannelType.value, ...newChannelAccess.value() },
       });
       channels = [...channels, channel];
       drawChannels();
@@ -368,6 +482,17 @@ export async function renderCommunity(communityId) {
       await api(`/communities/${communityId}/members/${member.id}`, { method: 'DELETE' });
       members = members.filter((m) => m.id !== member.id);
       drawMembers();
+    } catch (err) {
+      button.disabled = false;
+      button.textContent = err.message;
+    }
+  }
+
+  async function transferOwnership(member, button) {
+    try {
+      await api(`/communities/${communityId}/transfer`, { method: 'POST', body: { user_id: member.id } });
+      // Права поменялись целиком — проще перерисовать экран.
+      renderCommunity(communityId);
     } catch (err) {
       button.disabled = false;
       button.textContent = err.message;
@@ -559,6 +684,15 @@ export async function renderCommunity(communityId) {
               className: 'btn btn-ghost btn-sm',
               onConfirm: (button) => removeMember(member, button),
             }),
+          // Передать сообщество — только владелец и только участнику;
+          // сам он станет модератором.
+          isOwner && member.role !== 'owner' &&
+            confirmingButton({
+              label: 'Передать права',
+              confirmLabel: 'Сделать владельцем?',
+              className: 'btn btn-ghost btn-sm',
+              onConfirm: (button) => transferOwnership(member, button),
+            }),
           // Бан строже исключения: по ссылке больше не вернуться.
           canKick && outranks &&
             confirmingButton({
@@ -597,6 +731,43 @@ export async function renderCommunity(communityId) {
   }
 
   const title = el('h1', { class: 'settings-title', text: community.name });
+
+  // ===== уведомления сообщества =====
+  // Уровень для всего сообщества; у отдельного канала его можно
+  // переопределить колокольчиком в шапке канала.
+  const notifySection = el('section', { class: 'settings-section' });
+  async function drawNotify() {
+    let level = 'mentions';
+    try {
+      const { settings: list } = await api('/users/me/notifications');
+      level = list.find((n) => n.target_type === 'community' && n.target_id === communityId)?.level ?? 'mentions';
+    } catch {
+      /* покажем значение по умолчанию */
+    }
+    const options = [
+      ['all', 'Все сообщения', 'Звук и уведомление о каждом сообщении'],
+      ['mentions', 'Только упоминания', 'По умолчанию: когда упомянули вас или ваш тег'],
+      ['none', 'Ничего', 'Сообщество приглушено; упоминания видны значком'],
+    ];
+    notifySection.replaceChildren(
+      el('p', { class: 'settings-kicker', text: 'Мои уведомления' }),
+      ...options.map(([value, label, note]) => {
+        const radio = el('input', { type: 'radio', name: 'community-notify', value });
+        radio.checked = value === level;
+        radio.addEventListener('change', async () => {
+          await api('/users/me/notifications', {
+            method: 'PUT',
+            body: { target_type: 'community', target_id: communityId, level: value },
+          });
+        });
+        return el('label', { class: 'check' }, [
+          radio,
+          el('span', {}, [el('span', { class: 'row-title', text: label }), el('span', { class: 'row-note', text: note })]),
+        ]);
+      }),
+    );
+  }
+  drawNotify();
   const communityAvatar = el('div', { class: 'avatar-slot' });
   const drawCommunityAvatar = () => communityAvatar.replaceChildren(
     avatarNode(community.name, community.avatar_url, 'user-avatar avatar-large'),
@@ -718,6 +889,7 @@ export async function renderCommunity(communityId) {
                 el('label', { class: 'field-label', for: 'new-channel-type', text: 'Тип' }),
                 newChannelType,
               ]),
+              newChannelAccess.node,
               el('div', { class: 'btn-row' }, [
                 el('button', {
                   class: 'btn btn-secondary',
@@ -748,6 +920,8 @@ export async function renderCommunity(communityId) {
               tagNote,
             ]),
 
+          notifySection,
+
           membersKicker,
           membersSection,
 
@@ -762,8 +936,16 @@ export async function renderCommunity(communityId) {
             }),
           ]),
 
-          // Владельцу выход закрыт: пока нет передачи прав, сообщество
-          // осталось бы без хозяина.
+          // Владелец уйти не может — сообщество осталось бы без хозяина.
+          // Сначала передать права, потом выйти уже модератором.
+          isOwner &&
+            el('section', { class: 'settings-section' }, [
+              el('p', { class: 'settings-kicker', text: 'Участие' }),
+              el('p', {
+                class: 'row-note',
+                text: 'Чтобы уйти из сообщества, сначала передайте права владельца кому-то из участников — кнопкой «Передать права» в списке выше. Вы станете модератором и сможете выйти.',
+              }),
+            ]),
           !isOwner &&
             el('section', { class: 'settings-section' }, [
               el('p', { class: 'settings-kicker', text: 'Участие' }),

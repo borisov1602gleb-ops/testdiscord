@@ -12,6 +12,7 @@ import { errorHandler } from './lib/http.js';
 import { initRealtime } from './lib/realtime.js';
 import { applySchema } from './lib/schema.js';
 import { startEtlScheduler } from './etl/index.js';
+import { startCallSweeper } from './lib/call-sweeper.js';
 import { authRouter } from './routes/auth.js';
 import { usersRouter } from './routes/users.js';
 import { communitiesRouter } from './routes/communities.js';
@@ -80,6 +81,7 @@ await applySchema();
 server.listen(config.port, () => {
   console.log(`[backend] listening on :${config.port}`);
   startEtlScheduler();
+  startCallSweeper();
 });
 
 for (const signal of ['SIGTERM', 'SIGINT']) {

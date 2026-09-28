@@ -1,5 +1,5 @@
 // Экран звонка: подключение к комнате LiveKit, плитки участников, микрофон,
-// камера, демонстрация экрана и выход с подсчётом длительности.
+// камера, демонстрация экрана, общая доска и выход с подсчётом длительности.
 // Если сервер звонков недоступен, экран честно это показывает и всё равно
 // корректно завершает участие — иначе время в базе осталось бы несосчитанным.
 import { api } from '../api.js';
@@ -8,6 +8,7 @@ import { el, mount, icon, initial } from '../dom.js';
 import { navigate } from '../router.js';
 import { showInviteModal } from './home.js';
 import { settings, playChime } from '../settings.js';
+import { createBoard } from '../board.js';
 
 const STATUS_TEXT = {
   connecting: 'Подключаемся…',
@@ -256,8 +257,94 @@ export async function renderCall(callId) {
     });
   }
 
+  // «Я ещё здесь» раз в десять секунд. Если вкладку закрыть, сигналы
+  // прекратятся, и сервер сам выведет из звонка — никто не «висит» в
+  // голосовом. Если сервер уже вывел (компьютер засыпал), входим заново.
+  const personBody = () => (store.isAuthenticated ? {} : { anonymous_id: store.anonymousId });
+  async function heartbeat() {
+    if (leaving) return;
+    try {
+      await api(`/calls/${callId}/heartbeat`, { method: 'POST', auth: store.isAuthenticated, body: personBody() });
+    } catch (err) {
+      if (err.status !== 404) return;
+      try {
+        await api(`/calls/${callId}/join`, {
+          method: 'POST',
+          auth: store.isAuthenticated,
+          body: { ...personBody(), ...(active.inviteId ? { invite_id: active.inviteId } : {}) },
+        });
+      } catch (joinErr) {
+        if (joinErr.status === 410) {
+          statusDetail = 'Звонок уже завершён — выйдите и начните новый';
+          draw();
+        }
+      }
+    }
+  }
+  const heartbeatId = setInterval(heartbeat, 10_000);
+
+  // ===== доска =====
+  // Открывается по кнопке, плитки участников уезжают в полосу под ней.
+  // Соединение доски живёт, пока она открыта.
+  let board = null;
+  function toggleBoard() {
+    if (board) closeBoard();
+    else if (active.board) {
+      board = createBoard({
+        channelId: active.board.channel_id,
+        token: store.token || active.board.guest_token,
+        onClose: toggleBoard,
+      });
+      body.prepend(board.node);
+      board.focus();
+    }
+    draw();
+  }
+
+  // Кадр демонстрации для доски: отдельный видеоэлемент на время снимка,
+  // сжатие в JPEG до 1600 точек по длинной стороне.
+  async function captureFrame() {
+    const track = share?.track;
+    if (!track) return null;
+    const video = track.attach();
+    video.muted = true;
+    video.playsInline = true;
+    try {
+      await video.play().catch(() => {});
+      if (!video.videoWidth) {
+        await new Promise((resolve) => {
+          video.addEventListener('loadeddata', resolve, { once: true });
+          setTimeout(resolve, 2000);
+        });
+      }
+      if (!video.videoWidth) return null;
+      for (const [side, quality] of [[1600, 0.72], [1280, 0.55], [960, 0.45]]) {
+        const k = Math.min(1, side / Math.max(video.videoWidth, video.videoHeight));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(video.videoWidth * k);
+        canvas.height = Math.round(video.videoHeight * k);
+        canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+        const src = canvas.toDataURL('image/jpeg', quality);
+        if (src.length <= 880_000) return { src, width: canvas.width, height: canvas.height };
+      }
+      return null;
+    } finally {
+      track.detach(video);
+      video.remove();
+    }
+  }
+
+  function closeBoard() {
+    if (!board) return;
+    board.destroy();
+    board.node.remove();
+    board = null;
+  }
+
   async function leave() {
     leaving = true;
+    clearInterval(heartbeatId);
+    closeBoard();
     draw();
     try {
       await room?.disconnect();
@@ -361,6 +448,12 @@ export async function renderCall(callId) {
     title: 'Демонстрация экрана',
     onclick: toggleShare,
   });
+  const boardButton = el('button', {
+    class: 'ctl',
+    type: 'button',
+    title: 'Доска — рисовать и клеить стикеры вместе',
+    onclick: toggleBoard,
+  });
   const peopleButton = el('button', {
     class: 'ctl',
     type: 'button',
@@ -393,6 +486,7 @@ export async function renderCall(callId) {
         micButton,
         cameraButton,
         shareButton,
+        boardButton,
         peopleButton,
         el('span', { class: 'ctl-sep' }),
         hangButton,
@@ -512,6 +606,8 @@ export async function renderCall(callId) {
     } else bannerNode.remove();
 
     body.classList.toggle('is-sharing', Boolean(share));
+    body.classList.toggle('is-board', Boolean(board));
+    board?.setFrameSource(share ? captureFrame : null);
     if (share) {
       if (shareSlot.dataset.track !== share.track.sid) {
         shareSlot.dataset.track = share.track.sid;
@@ -568,23 +664,34 @@ export async function renderCall(callId) {
     shareButton.className = `ctl${sharing ? ' is-on' : ''}`;
     shareButton.disabled = status !== 'connected' || busyControl === 'share';
 
+    boardButton.replaceChildren(icon('board'));
+    boardButton.className = `ctl${board ? ' is-on' : ''}`;
+    boardButton.disabled = !active.board || leaving;
+
     peopleButton.replaceChildren(icon('people'));
     hangButton.replaceChildren(icon('hangup'));
     hangButton.disabled = leaving;
 
-    hintNode.textContent = leaving
-      ? 'Выходим из звонка…'
-      : sharing
-        ? 'Вы показываете экран'
-        : share
-          ? share.name
-          : 'Микрофон, камера, демонстрация экрана';
+    hintNode.textContent = hintText();
 
     if (!screen.isConnected) mount(screen);
   }
 
+  function hintText() {
+    if (leaving) return 'Выходим из звонка…';
+    if (board && share) return `${share.name} — «Кадр» положит его на доску`;
+    if (board) return 'Доска открыта — рисуют все участники звонка';
+    if (sharing) return 'Вы показываете экран';
+    if (share) return share.name;
+    return 'Микрофон, камера, демонстрация экрана, доска';
+  }
+
   const timerId = setInterval(draw, 1000);
-  window.addEventListener('hashchange', () => clearInterval(timerId), { once: true });
+  window.addEventListener('hashchange', () => {
+    clearInterval(timerId);
+    clearInterval(heartbeatId);
+    closeBoard();
+  }, { once: true });
 
   draw();
   connect();

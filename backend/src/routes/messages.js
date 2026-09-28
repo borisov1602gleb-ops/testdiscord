@@ -10,6 +10,7 @@ import { logEvent, EVENT_TYPES } from '../lib/events.js';
 import { requireAuth } from '../middleware/auth.js';
 import {
   requireMembership, getChannel, requireChannelAccess, isChatChannel, hasPermission,
+  requireCanPost, usersWithAccess, channelVisibleSql,
 } from '../lib/access.js';
 import { parseUuid } from '../lib/validate.js';
 import { emitToChannel } from '../lib/realtime.js';
@@ -61,7 +62,7 @@ const READER_HAS_ACCESS = `(
   OR EXISTS (SELECT 1 FROM channels rc
              JOIN community_members cm
                ON cm.community_id = rc.community_id AND cm.user_id = cr.user_id
-             WHERE rc.id = cr.channel_id)
+             WHERE rc.id = cr.channel_id AND ${channelVisibleSql('rc', 'cm')})
 )`;
 
 // Одно сообщение со всем, что нужно для показа. $1 — id смотрящего:
@@ -268,13 +269,9 @@ async function parseMentions(raw, channel, authorId) {
     throw new HttpError(400, 'too_many_mentions', { max: MAX_MENTIONS });
   }
   if (ids.length === 0) return [];
-  if (channel.type === 'direct') return ids.filter((id) => channel.member_ids.includes(id));
-  const { rows } = await query(
-    `SELECT user_id FROM community_members
-     WHERE community_id = $1 AND user_id = ANY($2::uuid[])`,
-    [channel.community_id, ids],
-  );
-  return rows.map((row) => row.user_id);
+  // Упомянуть можно только того, кто видит канал: в закрытом канале
+  // упоминание постороннего выдало бы ему, что там что-то происходит.
+  return usersWithAccess(channel, ids);
 }
 
 // Упоминание тега: «@Дизайнер» уведомляет всех, у кого этот тег. Теги —
@@ -307,7 +304,10 @@ async function expandTagMentions(tagIds, channel, authorId, userIds) {
      WHERE mt.tag_id = ANY($2::uuid[]) AND mt.user_id <> $3`,
     [channel.community_id, tagIds, authorId],
   );
-  const all = [...new Set([...userIds, ...rows.map((r) => r.user_id)])];
+  const visible = channel.is_private
+    ? await usersWithAccess(channel, rows.map((r) => r.user_id))
+    : rows.map((r) => r.user_id);
+  const all = [...new Set([...userIds, ...visible])];
   if (all.length > MAX_EXPANDED_MENTIONS) {
     throw new HttpError(400, 'too_many_mentions', { max: MAX_EXPANDED_MENTIONS });
   }
@@ -387,7 +387,8 @@ messagesRouter.post(
     const replyTo = req.body?.reply_to ? parseUuid(req.body.reply_to, 'reply_to') : null;
     const threadId = req.body?.thread_id ? parseUuid(req.body.thread_id, 'thread_id') : null;
 
-    const { channel } = await getChatChannel(channelId, req.user.id);
+    const { channel, role } = await getChatChannel(channelId, req.user.id);
+    requireCanPost(channel, role);
 
     if (threadId) {
       // Тред открывается только от живого сообщения общей ленты этого же
@@ -509,7 +510,11 @@ messagesRouter.get(
       const communityId = parseUuid(req.query.community_id, 'community_id');
       await requireMembership(req.user.id, communityId);
       params.push(communityId);
-      scope = "ch.community_id = $2 AND ch.type = 'text'";
+      // Закрытые каналы, которых человек не видит, в поиск не попадают.
+      scope = `ch.community_id = $2 AND ch.type = 'text' AND EXISTS (
+        SELECT 1 FROM community_members cm
+        WHERE cm.community_id = ch.community_id AND cm.user_id = $1
+          AND ${channelVisibleSql('ch', 'cm')})`;
     }
     // % и _ в запросе — обычные символы, а не шаблоны LIKE.
     params.push(`%${text.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);

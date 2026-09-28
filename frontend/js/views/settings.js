@@ -7,6 +7,7 @@ import { el, mount, icon } from '../dom.js';
 import { navigate } from '../router.js';
 import { settings, listDevices, playChime } from '../settings.js';
 import { avatarNode, pickAndUploadAvatar } from '../avatar.js';
+import { notificationState, enableNotifications, disableNotifications } from '../notify.js';
 
 const SECTIONS = [
   { id: 'account', group: 'Пользователь', title: 'Моя учётная запись', icon: 'profile' },
@@ -249,9 +250,36 @@ export async function renderSettings() {
       ]);
     };
 
+    // Уведомления браузера: включение спрашивает разрешение у браузера.
+    const notifyInput = el('input', { type: 'checkbox' });
+    const notifyNote = el('span', { class: 'row-note' });
+    const NOTIFY_NOTES = {
+      granted: 'Включены. О чём уведомлять, настраивается колокольчиком в шапке канала.',
+      off: 'Выключены. Включите, чтобы видеть личные сообщения и упоминания, даже когда вкладка свёрнута.',
+      default: 'Браузер ещё не спросил разрешения.',
+      denied: 'Браузер запретил уведомления для этого сайта — разрешите их в настройках сайта (значок замка у адреса).',
+      unsupported: 'Этот браузер не умеет показывать уведомления.',
+    };
+    const drawNotify = () => {
+      const state = notificationState();
+      notifyInput.checked = state === 'granted';
+      notifyInput.disabled = state === 'unsupported';
+      notifyNote.textContent = NOTIFY_NOTES[state] ?? '';
+    };
+    notifyInput.addEventListener('change', async () => {
+      if (notifyInput.checked) await enableNotifications();
+      else disableNotifications();
+      drawNotify();
+    });
+    drawNotify();
+
     return [
       el('section', { class: 'settings-section' }, [
-        toggle('soundOnMessage', 'Звук нового сообщения', 'Только когда вкладка не активна.'),
+        el('label', { class: 'check' }, [
+          notifyInput,
+          el('span', {}, [el('span', { class: 'row-title', text: 'Уведомления в браузере' }), notifyNote]),
+        ]),
+        toggle('soundOnMessage', 'Звук нового сообщения', 'Когда приходит сообщение, о котором вы просили уведомлять.'),
         toggle('soundOnJoin', 'Звук входа в звонок', 'Когда кто-то присоединяется к вашему звонку.'),
         el('div', { class: 'btn-row', style: 'justify-content:flex-start' }, [
           el('button', {

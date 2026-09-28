@@ -170,6 +170,18 @@ const ICONS = {
       ['path', { d: 'M3 13V8M8 13V3M13 13v-7', stroke: 'currentColor', 'stroke-width': 1.8, 'stroke-linecap': 'round' }],
     ],
   },
+  megaphone: {
+    box: 16,
+    shapes: [
+      ['path', { d: 'M2.5 6.5v3h2l5 3v-9l-5 3zM11.5 6a2.5 2.5 0 010 4M5 9.5l.8 3.5', stroke: 'currentColor', 'stroke-width': 1.3, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }],
+    ],
+  },
+  board: {
+    box: 16,
+    shapes: [
+      ['path', { d: 'M2 2.8h12v8.4H2zM5.5 14l2.5-2.8 2.5 2.8M4.5 8.5l2.2-2.4 1.8 1.6 3-3', stroke: 'currentColor', 'stroke-width': 1.3, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }],
+    ],
+  },
   alert: {
     box: 18,
     shapes: [

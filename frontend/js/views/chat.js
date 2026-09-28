@@ -571,11 +571,11 @@ export function createChat({
     cancelEdit();
     closePopover();
     jumpButton.hidden = true;
-    input.disabled = false;
-    sendButton.disabled = false;
-    attachButton.disabled = false;
-    micButton.disabled = false;
-    pollButton.disabled = false;
+    // В канале «только для чтения» пишут старшие роли; остальным поле
+    // ввода показываем выключенным, с объяснением.
+    const canWrite = !next.read_only || permissions.includes('post_read_only');
+    for (const control of [input, sendButton, attachButton, micButton, pollButton]) control.disabled = !canWrite;
+    composer.classList.toggle('is-readonly', !canWrite);
     feed.replaceChildren(topSlot);
     topSlot.textContent = '';
   }
@@ -590,7 +590,9 @@ export function createChat({
     if (heading !== undefined) title.textContent = heading;
     else if (!isThread) title.textContent = next.type === 'direct' ? next.name : `# ${next.name}`;
     input.placeholder = placeholder
-      ?? (isThread ? 'Ответить в треде' : next.type === 'direct' ? 'Написать сообщение' : `Написать в #${next.name}`);
+      ?? (next.read_only && !permissions.includes('post_read_only')
+        ? 'Канал объявлений — пишут только модераторы'
+        : isThread ? 'Ответить в треде' : next.type === 'direct' ? 'Написать сообщение' : `Написать в #${next.name}`);
 
     if (isThread) return openThread(token);
 

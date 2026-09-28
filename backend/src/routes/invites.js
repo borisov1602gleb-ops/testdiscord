@@ -61,8 +61,9 @@ invitesRouter.get(
     const exhausted = invite.max_uses != null && invite.use_count >= invite.max_uses;
 
     const { rows: voiceChannels } = await query(
+      // Гостю по ссылке предлагаем только открытый голосовой канал.
       `SELECT id, name FROM channels
-       WHERE community_id = $1 AND type = 'voice'
+       WHERE community_id = $1 AND type = 'voice' AND NOT is_private
        ORDER BY created_at LIMIT 1`,
       [invite.community_id],
     );

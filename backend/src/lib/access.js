@@ -17,10 +17,13 @@ export async function requireMembership(userId, communityId) {
 // проверяется доступ и рассылаются события.
 export async function getChannel(channelId) {
   const { rows } = await query(
-    `SELECT c.id, c.community_id, c.name, c.type,
+    `SELECT c.id, c.community_id, c.name, c.type, c.is_private, c.read_only,
             CASE WHEN c.type = 'direct'
               THEN (SELECT array_agg(user_id) FROM direct_members WHERE channel_id = c.id)
-            END AS member_ids
+            END AS member_ids,
+            CASE WHEN c.is_private
+              THEN COALESCE((SELECT array_agg(tag_id) FROM channel_allowed_tags WHERE channel_id = c.id), '{}')
+            END AS allowed_tag_ids
      FROM channels c WHERE c.id = $1`,
     [channelId],
   );
@@ -33,8 +36,32 @@ export function isChatChannel(channel) {
   return channel.type === 'text' || channel.type === 'direct';
 }
 
-// Доступ к каналу: в сообществе — членство, в личной переписке — быть
-// одним из двоих. Возвращает роль: владелец сообщества может больше.
+// Кто видит закрытый канал — одно правило для всех запросов: владелец,
+// модераторы и участники, у которых есть хотя бы один из разрешённых
+// тегов. ch — псевдоним таблицы channels, cm — community_members нужного
+// человека в этом сообществе.
+export function channelVisibleSql(ch = 'ch', cm = 'cm') {
+  return `(NOT ${ch}.is_private
+    OR ${cm}.role IN ('owner', 'moderator')
+    OR EXISTS (
+      SELECT 1 FROM channel_allowed_tags cat
+      JOIN member_tags mt ON mt.tag_id = cat.tag_id
+      WHERE cat.channel_id = ${ch}.id AND mt.user_id = ${cm}.user_id
+    ))`;
+}
+
+async function hasAllowedTag(userId, channel) {
+  if (!channel.allowed_tag_ids?.length) return false;
+  const { rows } = await query(
+    'SELECT 1 FROM member_tags WHERE user_id = $1 AND tag_id = ANY($2::uuid[]) LIMIT 1',
+    [userId, channel.allowed_tag_ids],
+  );
+  return rows.length > 0;
+}
+
+// Доступ к каналу: в сообществе — членство (а в закрытый канал — ещё и
+// роль или нужный тег), в личной переписке — быть одним из двоих.
+// Возвращает роль: старшие роли могут больше.
 export async function requireChannelAccess(userId, channel) {
   if (channel.type === 'direct') {
     if (!channel.member_ids?.includes(userId)) {
@@ -42,7 +69,35 @@ export async function requireChannelAccess(userId, channel) {
     }
     return 'member';
   }
-  return requireMembership(userId, channel.community_id);
+  const role = await requireMembership(userId, channel.community_id);
+  if (channel.is_private && ROLE_RANK[role] < ROLE_RANK.moderator && !(await hasAllowedTag(userId, channel))) {
+    throw new HttpError(403, 'private_channel');
+  }
+  return role;
+}
+
+// Писать в канал «только для чтения» могут старшие роли.
+export function requireCanPost(channel, role) {
+  if (channel.read_only && !hasPermission(role, 'post_read_only')) {
+    throw new HttpError(403, 'channel_read_only');
+  }
+}
+
+// Кто из перечисленных людей видит канал: для упоминаний и рассылки
+// событий закрытого канала.
+export async function usersWithAccess(channel, userIds = null) {
+  if (channel.type === 'direct') {
+    return (channel.member_ids ?? []).filter((id) => !userIds || userIds.includes(id));
+  }
+  const { rows } = await query(
+    `SELECT cm.user_id FROM community_members cm
+     JOIN channels ch ON ch.id = $1
+     WHERE cm.community_id = ch.community_id
+       AND ($2::uuid[] IS NULL OR cm.user_id = ANY($2::uuid[]))
+       AND ${channelVisibleSql('ch', 'cm')}`,
+    [channel.id, userIds],
+  );
+  return rows.map((r) => r.user_id);
 }
 
 // ===== роли и права в сообществе =====
@@ -57,7 +112,8 @@ export const PERMISSIONS = {
   kick_members: 'moderator',       // исключать и банить тех, кто младше по роли
   handle_reports: 'moderator',     // разбирать жалобы на сообщения
   manage_tags: 'moderator',        // создавать теги и выставлять их участникам
-  manage_channels: 'moderator',    // создавать каналы
+  manage_channels: 'moderator',    // создавать каналы, делать их закрытыми
+  post_read_only: 'moderator',     // писать в каналы «только для чтения»
   manage_roles: 'owner',           // назначать и снимать модераторов
   manage_community: 'owner',       // переименовывать сообщество
   view_analytics: 'owner',         // смотреть аналитику
