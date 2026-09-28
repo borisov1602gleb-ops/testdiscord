@@ -118,6 +118,13 @@ invitesRouter.post(
         throw new HttpError(410, 'invite_exhausted');
       }
 
+      // Забаненного не пускает ни одна ссылка — даже новая.
+      const { rows: bans } = await client.query(
+        'SELECT 1 FROM community_bans WHERE community_id = $1 AND user_id = $2',
+        [invite.community_id, req.user.id],
+      );
+      if (bans.length > 0) throw new HttpError(403, 'banned_from_community');
+
       const { rows: existing } = await client.query(
         'SELECT * FROM community_members WHERE community_id = $1 AND user_id = $2',
         [invite.community_id, req.user.id],

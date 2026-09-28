@@ -9,6 +9,7 @@ import { playChime } from '../settings.js';
 import { navigate } from '../router.js';
 import { createChat, formatFull } from './chat.js';
 import { can, tagChip, roleBadge } from '../roles.js';
+import { avatarNode } from '../avatar.js';
 
 let socket = null;
 let activeChats = [];
@@ -28,8 +29,8 @@ function countLabel(n) {
   return n > 99 ? '99+' : String(n);
 }
 
-function avatar(name, online, className = 'person-avatar') {
-  return el('span', { class: `${className}${online ? ' is-online' : ''}`, text: initial(name) });
+function avatar(name, online, url = null, className = 'person-avatar') {
+  return avatarNode(name, url, `${className}${online ? ' is-online' : ''}`);
 }
 
 // Подсветка найденного: запрос ищется без учёта регистра, а в разметку
@@ -80,7 +81,9 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
   let role = 'member';
   let permissions = [];
   let members = [];
-  let tags = [];
+  // Один и тот же массив на всё время жизни экрана: на него ссылаются
+  // чаты (подсказка упоминаний), поэтому меняем содержимое, а не ссылку.
+  const tags = [];
   let textChannels = [];
   let voiceChannels = [];
   let unread = new Map();
@@ -100,7 +103,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
       api(`/communities/${communityId}/voice`),
     ]);
     members = membersData.members;
-    tags = membersData.tags ?? [];
+    tags.push(...(membersData.tags ?? []));
     for (const m of members) presence.set(m.id, m.online);
     unread = new Map(unreadData.channels.map((c) => [c.channel_id, c]));
     voice = voiceData.channels;
@@ -116,6 +119,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
   let threadRoot = null;
   let panelKind = null;
   let tagFilter = null; // тег, по которому отфильтрован список участников
+  let reportCount = 0; // открытые жалобы — только для модерации
 
   // Рядом с именем автора в чате — значок роли и до трёх тегов.
   function decorateAuthor(userId) {
@@ -131,6 +135,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
     community,
     permissions,
     members,
+    tags,
     decorateAuthor: direct ? null : decorateAuthor,
     onRead: clearUnread,
     onOpenThread: openThread,
@@ -178,7 +183,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
             onclick: () => navigate(`#/c/${item.id}`),
           },
           [
-            el('span', { class: 'rail-badge', text: initial(item.name) }),
+            avatarNode(item.name, item.avatar_url, 'rail-badge'),
             el('span', { class: 'rail-name', text: item.name }),
             total > 0 &&
               el('span', {
@@ -293,7 +298,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
             onclick: () => openConversation(conv),
           },
           [
-            avatar(conv.user.name, online),
+            avatar(conv.user.name, online, conv.user.avatar_url),
             el('span', { class: 'dm-texts' }, [
               el('span', { class: 'dm-name', text: conv.user.name }),
               el('span', {
@@ -348,6 +353,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
       hasChannel && headButton('search', direct ? 'Поиск в переписке' : 'Поиск по сообществу', 'search', showSearch),
       hasChannel && headButton('pins', 'Закреплённые', 'pin', showPins),
       !direct && headButton('members', 'Участники', 'people', showMembers),
+      !direct && can(permissions, 'handle_reports') && reportsButton(),
       !direct &&
         el('button', {
           class: 'btn btn-primary btn-sm',
@@ -356,6 +362,78 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
           onclick: () => showInviteModal(community.id),
         }),
     ].filter(Boolean));
+  }
+
+  // Кнопка жалоб со счётчиком: видна только тем, кто их разбирает.
+  function reportsButton() {
+    const button = headButton('reports', 'Жалобы', 'flag', showReports);
+    button.classList.add('head-btn-count');
+    if (reportCount > 0) button.append(el('span', { class: 'head-badge', text: String(reportCount) }));
+    return button;
+  }
+
+  async function showReports() {
+    const list = el('div', { class: 'panel-list' }, [panelEmpty('Загружаем…')]);
+    openPanel('reports', 'Жалобы', el('div', { class: 'panel-body' }, [list]));
+    try {
+      const { items, open_count: openCount } = await api(`/communities/${community.id}/reports`);
+      reportCount = openCount;
+      drawHeadActions();
+      if (panelKind !== 'reports') return;
+      list.replaceChildren(
+        ...(items.length
+          ? items.map(reportCard)
+          : [panelEmpty('Жалоб нет — всё спокойно')]),
+      );
+    } catch (err) {
+      list.replaceChildren(panelEmpty(err.message));
+    }
+  }
+
+  function reportCard(item) {
+    const { message, reports } = item;
+    async function resolve(action, button) {
+      button.disabled = true;
+      try {
+        await api(`/communities/${community.id}/reports/${message.id}/resolve`, { method: 'POST', body: { action } });
+        showReports();
+      } catch (err) {
+        button.disabled = false;
+        button.textContent = err.message;
+      }
+    }
+    return el('div', { class: 'panel-card report-card' }, [
+      el('button', { class: 'panel-item', type: 'button', onclick: () => jumpTo(message) }, [
+        el('span', { class: 'panel-meta' }, [
+          el('b', { text: `#${message.channel_name}` }),
+          el('span', { text: message.author_name }),
+          el('span', { class: 'panel-time', text: formatFull(message.created_at) }),
+          el('span', { class: 'panel-tag report-count', text: `жалоб: ${reports.length}` }),
+        ]),
+        el('span', { class: 'panel-text', text: message.content || 'сообщение без текста' }),
+      ]),
+      el('ul', { class: 'report-list' }, reports.map((r) =>
+        el('li', {}, [
+          el('b', { text: r.reason_label }),
+          ` — ${r.reporter_name}`,
+          r.comment && el('span', { class: 'report-comment', text: `: «${r.comment}»` }),
+        ]))),
+      el('div', { class: 'report-actions' }, [
+        el('button', {
+          class: 'btn btn-secondary btn-sm',
+          type: 'button',
+          text: 'Оставить',
+          title: 'Жалобы необоснованны — закрыть их',
+          onclick: (e) => resolve('dismiss', e.currentTarget),
+        }),
+        el('button', {
+          class: 'btn btn-danger btn-sm',
+          type: 'button',
+          text: 'Удалить сообщение',
+          onclick: (e) => resolve('delete', e.currentTarget),
+        }),
+      ]),
+    ]);
   }
 
   function openPanel(kind, heading, body) {
@@ -480,7 +558,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
   function memberRow(m) {
     const online = presence.get(m.id);
     return el('div', { class: 'member-row' }, [
-      avatar(m.name, online),
+      avatar(m.name, online, m.avatar_url),
       el('div', { class: 'member-main' }, [
         el('span', { class: 'member-name', text: m.id === me ? `${m.name} (вы)` : m.name }),
         (m.role !== 'member' || m.tags.length > 0) &&
@@ -554,6 +632,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
       community,
       permissions,
       members,
+      tags,
       decorateAuthor: direct ? null : decorateAuthor,
       thread: root,
       onRead: clearUnread,
@@ -657,7 +736,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
         const data = await api(`/communities/${community.id}/members`);
         // Тот же массив, а не новый: на него ссылаются чаты (упоминания).
         members.splice(0, members.length, ...data.members);
-        tags = data.tags ?? tags;
+        if (data.tags) tags.splice(0, tags.length, ...data.tags);
         for (const m of members) presence.set(m.id, m.online);
       }
       presence.set(me, true);
@@ -753,6 +832,16 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
       if (threadRoot?.id === payload.id) closePanel();
       if (panelKind === 'pins' && payload.channel_id === activeChannel?.id) showPins();
     });
+    socket.on('poll_updated', (payload) => {
+      chat.onPoll(payload);
+      threadChat?.onPoll(payload);
+    });
+    socket.on('reports_updated', ({ community_id: cid, open_count: openCount }) => {
+      if (cid !== community?.id) return;
+      reportCount = openCount;
+      drawHeadActions();
+      if (panelKind === 'reports') showReports();
+    });
     socket.on('reactions_updated', (payload) => {
       chat.onReactions(payload);
       threadChat?.onReactions(payload);
@@ -803,7 +892,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
       try {
         const data = await api(`/communities/${cid}/members`);
         members.splice(0, members.length, ...data.members);
-        tags = data.tags;
+        tags.splice(0, tags.length, ...data.tags);
         if (tagFilter && !tags.some((t) => t.id === tagFilter)) tagFilter = null;
         chat.redrawAll();
         threadChat?.redrawAll();
@@ -867,6 +956,14 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
   ]);
   mount(layout);
   connect();
+  if (!direct && can(permissions, 'handle_reports')) {
+    api(`/communities/${community.id}/reports/count`)
+      .then(({ open_count: openCount }) => {
+        reportCount = openCount;
+        drawHeadActions();
+      })
+      .catch(() => {});
+  }
 
   if (direct) {
     let target = conversationId ? conversations.find((c) => c.id === conversationId) : conversations[0];
@@ -901,7 +998,7 @@ function userZone() {
 
   const menu = el('div', { class: 'user-menu' }, [
     el('div', { class: 'user-menu-head' }, [
-      el('div', { class: 'user-avatar', text: initial(name) }),
+      avatarNode(name, store.user?.avatar_url, 'user-avatar'),
       el('div', { class: 'user-texts' }, [
         el('span', { class: 'user-name', text: name }),
         el('span', { class: 'user-menu-mail', text: store.user?.email ?? '' }),
@@ -950,7 +1047,7 @@ function userZone() {
 
   zone.append(
     el('button', { class: 'user-bar', type: 'button', onclick: () => toggle() }, [
-      el('div', { class: 'user-avatar', text: initial(name) }),
+      avatarNode(name, store.user?.avatar_url, 'user-avatar'),
       el('div', { class: 'user-texts' }, [
         el('span', { class: 'user-name', text: name }),
         el('span', { class: 'user-status', text: 'В сети' }),

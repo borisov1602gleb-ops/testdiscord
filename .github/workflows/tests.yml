@@ -94,6 +94,10 @@ jobs:
         working-directory: backend
         run: node scripts/ws-test.mjs
 
+      - name: Превью ссылок — защита от запросов во внутреннюю сеть
+        working-directory: backend
+        run: node scripts/preview-test.mjs
+
       - name: Лог backend при падении
         if: failure()
         run: cat backend.log

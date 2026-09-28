@@ -3,9 +3,10 @@
 // только этого компьютера.
 import { api } from '../api.js';
 import { store } from '../store.js';
-import { el, mount, icon, initial } from '../dom.js';
+import { el, mount, icon } from '../dom.js';
 import { navigate } from '../router.js';
 import { settings, listDevices, playChime } from '../settings.js';
+import { avatarNode, pickAndUploadAvatar } from '../avatar.js';
 
 const SECTIONS = [
   { id: 'account', group: 'Пользователь', title: 'Моя учётная запись', icon: 'profile' },
@@ -58,7 +59,34 @@ export async function renderSettings() {
       value: profile.display_name ?? '',
     });
     const saved = el('p', { class: 'saved-note' });
-    const headAvatar = el('div', { class: 'user-avatar', text: initial(profile.public_name) });
+    const headAvatar = el('div', { class: 'avatar-slot' });
+    const avatarNote = el('p', { class: 'saved-note' });
+    const drawAvatar = () => headAvatar.replaceChildren(
+      avatarNode(profile.public_name, profile.avatar_url, 'user-avatar avatar-large'),
+    );
+    drawAvatar();
+
+    async function changeAvatar() {
+      avatarNote.className = 'saved-note';
+      try {
+        const result = await pickAndUploadAvatar('/users/me/avatar');
+        if (!result) return;
+        profile = result.user;
+        store.setSession(store.token, profile);
+        drawAvatar();
+        avatarNote.textContent = 'Аватарка обновлена';
+      } catch (err) {
+        avatarNote.className = 'field-error';
+        avatarNote.textContent = err.message;
+      }
+    }
+
+    async function removeAvatar() {
+      ({ user: profile } = await api('/users/me/avatar', { method: 'DELETE' }));
+      store.setSession(store.token, profile);
+      drawAvatar();
+      avatarNote.textContent = 'Аватарка убрана';
+    }
     const headName = el('span', { class: 'row-title', text: profile.public_name });
 
     async function save() {
@@ -71,7 +99,7 @@ export async function renderSettings() {
         // Имя показывается в плашке профиля и в звонке, поэтому обновляем
         // и сохранённую копию профиля в браузере.
         store.setSession(store.token, profile);
-        headAvatar.textContent = initial(profile.public_name);
+        drawAvatar();
         headName.textContent = profile.public_name;
         saved.textContent = 'Сохранено';
       } catch (err) {
@@ -84,7 +112,13 @@ export async function renderSettings() {
       el('div', { class: 'settings-row' }, [
         headAvatar,
         el('div', { class: 'user-texts' }, [headName, el('span', { class: 'row-note', text: profile.email })]),
+        el('div', { class: 'row-actions' }, [
+          el('button', { class: 'btn btn-secondary btn-sm', type: 'button', text: 'Сменить аватарку', onclick: changeAvatar }),
+          profile.avatar_url &&
+            el('button', { class: 'btn btn-ghost btn-sm', type: 'button', text: 'Убрать', onclick: removeAvatar }),
+        ]),
       ]),
+      avatarNote,
       el('section', { class: 'settings-section' }, [
         el('div', { class: 'field' }, [
           el('label', { class: 'field-label', for: 'display-name', text: 'Отображаемое имя' }),

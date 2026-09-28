@@ -7,6 +7,8 @@
 import { api, uploadFile } from '../api.js';
 import { store } from '../store.js';
 import { el, formatTime, icon, initial } from '../dom.js';
+import { renderRich, firstLink, safeHref } from '../rich-text.js';
+import { avatarNode } from '../avatar.js';
 
 // Тот же набор, что на сервере: другие реакции он не примет.
 const REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🔥'];
@@ -23,6 +25,29 @@ const BOTTOM_SLACK = 120;
 const TYPING_SHOW_MS = 4500;
 const TYPING_SEND_EVERY_MS = 2500;
 const LETTER_OR_DIGIT = /[\p{L}\p{N}]/u;
+const REPORT_REASONS = [['spam', 'Спам'], ['abuse', 'Оскорбления'], ['other', 'Другое']];
+// Голосовое — не больше пяти минут: дальше это уже подкаст.
+const MAX_VOICE_MS = 5 * 60 * 1000;
+const POLL_MAX_OPTIONS = 10;
+
+// Превью ссылок общие на все чаты вкладки: одна и та же ссылка в разных
+// каналах не должна запрашиваться дважды.
+const previewCache = new Map();
+
+function formatClock(seconds) {
+  const s = Math.max(0, Math.round(seconds || 0));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+function votersWord(n) {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return 'проголосовал';
+  return 'проголосовали';
+}
+
+// Играет только одно голосовое за раз — как в мессенджерах.
+let playingAudio = null;
 
 function formatSize(bytes) {
   if (bytes < 1024) return `${bytes} Б`;
@@ -61,6 +86,7 @@ function hasToken(text, token) {
 //  community — сообщество (null для личной переписки);
 //  permissions — права в сообществе: удалять чужое, закреплять;
 //  members   — кого можно упомянуть;
+//  tags      — теги сообщества: их тоже можно упомянуть («@Дизайнер»);
 //  thread    — корневое сообщение, если это чат треда;
 //  decorateAuthor — что показать рядом с именем автора (роль, теги);
 //  onRead, onOpenThread, onAuthorClick, onTyping — связи с экраном.
@@ -69,6 +95,7 @@ export function createChat({
   permissions = [],
   decorateAuthor,
   members = [],
+  tags = [],
   thread = null,
   onRead,
   onOpenThread,
@@ -148,28 +175,23 @@ export function createChat({
     else topSlot.textContent = channel ? `Это начало канала #${channel.name}` : '';
   }
 
-  function withMentions(text, mentions) {
-    const tokens = (mentions ?? [])
-      .map((m) => ({ token: `@${m.name}`, self: m.user_id === me }))
-      .sort((a, b) => b.token.length - a.token.length);
-    if (tokens.length === 0) return [text];
+  // Упоминания для подсветки в тексте: люди и теги.
+  function mentionTokens(message) {
+    return [
+      ...(message.mentions ?? []).map((m) => ({
+        token: `@${m.name}`,
+        className: m.user_id === me ? 'mention mention-me' : 'mention',
+      })),
+      ...(message.tag_mentions ?? []).map((t) => ({
+        token: `@${t.name}`,
+        className: `mention mention-tag tag-${t.color}`,
+      })),
+    ];
+  }
 
-    const out = [];
-    let plainFrom = 0;
-    let pos = 0;
-    while (pos < text.length) {
-      const hit = text[pos] === '@' && tokens.find((t) => text.startsWith(t.token, pos));
-      if (hit) {
-        if (pos > plainFrom) out.push(text.slice(plainFrom, pos));
-        out.push(el('span', { class: hit.self ? 'mention mention-me' : 'mention', text: hit.token }));
-        pos += hit.token.length;
-        plainFrom = pos;
-      } else {
-        pos += 1;
-      }
-    }
-    if (plainFrom < text.length) out.push(text.slice(plainFrom));
-    return out;
+  function nameOf(userId) {
+    if (userId === me) return 'Вы';
+    return members.find((m) => m.id === userId)?.name ?? 'участник';
   }
 
   function flash(node) {
@@ -202,7 +224,146 @@ export function createChat({
     );
   }
 
+  // Голосовое: кнопка, полоса прогресса (по ней можно перемотать) и время.
+  function voicePlayer(att) {
+    const audio = el('audio', { preload: 'none', src: att.url });
+    const known = att.duration_ms ? att.duration_ms / 1000 : 0;
+    const playIcon = el('span', { class: 'voice-icon' }, [icon('play', 14)]);
+    const fill = el('span', { class: 'voice-fill' });
+    const bar = el('span', { class: 'voice-bar' }, [fill]);
+    const time = el('span', { class: 'voice-time', text: formatClock(known) });
+    // В записи из браузера длительность часто неизвестна (Infinity) —
+    // тогда берём ту, что сохранили при отправке.
+    const duration = () => (Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : known);
+
+    const button = el('button', { class: 'voice-play', type: 'button', 'aria-label': 'Слушать' }, [playIcon]);
+    button.addEventListener('click', () => {
+      if (audio.paused) {
+        if (playingAudio && playingAudio !== audio) playingAudio.pause();
+        playingAudio = audio;
+        audio.play().catch(() => showError('Не удалось воспроизвести'));
+      } else {
+        audio.pause();
+      }
+    });
+    audio.addEventListener('play', () => playIcon.replaceChildren(icon('pause', 14)));
+    audio.addEventListener('pause', () => playIcon.replaceChildren(icon('play', 14)));
+    audio.addEventListener('ended', () => {
+      fill.style.width = '0%';
+      time.textContent = formatClock(duration());
+    });
+    audio.addEventListener('timeupdate', () => {
+      const total = duration();
+      if (total) fill.style.width = `${Math.min(100, (audio.currentTime / total) * 100)}%`;
+      time.textContent = `${formatClock(audio.currentTime)} / ${formatClock(total)}`;
+    });
+    bar.addEventListener('click', (event) => {
+      const total = duration();
+      if (!total) return;
+      const rect = bar.getBoundingClientRect();
+      audio.currentTime = ((event.clientX - rect.left) / rect.width) * total;
+      if (audio.paused) button.click();
+    });
+    return el('div', { class: 'voice' }, [button, bar, time, audio]);
+  }
+
+  // Превью ссылки грузится, только когда сообщение попало на экран.
+  const previewObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      previewObserver.unobserve(entry.target);
+      entry.target.load();
+    }
+  }, { root: feed, rootMargin: '200px' });
+
+  function linkPreview(url) {
+    const slot = el('div', { class: 'link-preview-slot' });
+    slot.load = async () => {
+      if (!previewCache.has(url)) {
+        previewCache.set(url, api(`/link-preview?url=${encodeURIComponent(url)}`)
+          .then((r) => r.preview)
+          .catch(() => null));
+      }
+      const preview = await previewCache.get(url);
+      const href = preview && safeHref(preview.url);
+      if (!href) return slot.remove();
+      const stick = pinned;
+      slot.replaceWith(
+        el('a', { class: 'link-preview', href, target: '_blank', rel: 'noopener noreferrer nofollow' }, [
+          el('span', { class: 'link-preview-site', text: preview.site_name ?? '' }),
+          el('span', { class: 'link-preview-title', text: preview.title }),
+          preview.description && el('span', { class: 'link-preview-desc', text: preview.description }),
+        ]),
+      );
+      if (stick) scrollToBottom();
+    };
+    previewObserver.observe(slot);
+    return slot;
+  }
+
+  // Опрос: варианты с полосками, свой выбор отмечен галочкой. Опрос
+  // открытый — по наведению видно, кто за что.
+  function pollView(message) {
+    const poll = message.poll;
+    const mine = new Set(poll.options.filter((o) => o.voter_ids.includes(me)).map((o) => o.id));
+    const canClose = !poll.closed && (message.user_id === me || canDeleteAny());
+    return el('div', { class: `poll${poll.closed ? ' is-closed' : ''}` }, [
+      el('p', { class: 'poll-question' }, [icon('poll', 14), poll.question]),
+      el('p', { class: 'poll-kind', text: poll.multiple ? 'Можно выбрать несколько' : 'Один вариант' }),
+      ...poll.options.map((option) => {
+        const count = option.voter_ids.length;
+        const percent = poll.voters ? Math.round((count / poll.voters) * 100) : 0;
+        return el('button', {
+          class: `poll-option${mine.has(option.id) ? ' is-mine' : ''}`,
+          type: 'button',
+          disabled: poll.closed ? 'true' : null,
+          title: count ? option.voter_ids.map(nameOf).join(', ') : 'Пока никто',
+          onclick: () => vote(message, option.id),
+        }, [
+          el('span', { class: 'poll-fill', style: `width: ${percent}%` }),
+          el('span', { class: 'poll-check', text: mine.has(option.id) ? '✓' : '' }),
+          el('span', { class: 'poll-text', text: option.text }),
+          el('span', { class: 'poll-count', text: `${count} · ${percent}%` }),
+        ]);
+      }),
+      el('div', { class: 'poll-foot' }, [
+        el('span', { text: `${poll.voters} ${votersWord(poll.voters)}${poll.closed ? ' · опрос закрыт' : ''}` }),
+        canClose && el('button', { class: 'poll-close', type: 'button', text: 'Закрыть опрос', onclick: () => closePoll(message) }),
+      ]),
+    ]);
+  }
+
+  async function vote(message, optionId) {
+    const poll = message.poll;
+    const mine = new Set(poll.options.filter((o) => o.voter_ids.includes(me)).map((o) => o.id));
+    let next;
+    if (poll.multiple) {
+      if (mine.has(optionId)) mine.delete(optionId);
+      else mine.add(optionId);
+      next = [...mine];
+    } else {
+      // Повторное нажатие на свой вариант снимает голос.
+      next = mine.has(optionId) ? [] : [optionId];
+    }
+    try {
+      const result = await api(`/polls/${poll.id}/vote`, { method: 'PUT', body: { option_ids: next } });
+      redraw(message.id, { poll: result.poll });
+    } catch (err) {
+      showError(err.message);
+    }
+  }
+
+  async function closePoll(message) {
+    try {
+      const result = await api(`/polls/${message.poll.id}/close`, { method: 'POST' });
+      redraw(message.id, { poll: result.poll });
+    } catch (err) {
+      showError(err.message);
+    }
+  }
+
   function attachmentView(att) {
+    if (att.is_audio) return voicePlayer(att);
     if (att.is_image) {
       const img = el('img', { class: 'msg-image', src: att.url, alt: att.filename, loading: 'lazy' });
       // Картинка догружается позже текста и сдвигает ленту: если человек
@@ -287,7 +448,15 @@ export function createChat({
     if (!isThread && !message.thread_id && canPin()) {
       bar.append(tool(message.pinned ? 'Открепить' : 'Закрепить', 'pin', () => togglePin(message)));
     }
-    if (own) bar.append(tool('Изменить', 'pencil', () => startEdit(message)));
+    if (own && !message.poll) bar.append(tool('Изменить', 'pencil', () => startEdit(message)));
+    // Пожаловаться — на чужое сообщение в сообществе; в личке модерации нет.
+    if (!own && channel?.type !== 'direct') {
+      const reportButton = tool('Пожаловаться', 'flag', (event) => {
+        event.stopPropagation();
+        showReportForm(message, reportButton);
+      });
+      bar.append(reportButton);
+    }
     if (own || canDeleteAny()) {
       // Удаление в два нажатия: первое спрашивает, второе удаляет.
       const del = tool('Удалить', 'trash', () => {
@@ -340,8 +509,11 @@ export function createChat({
       body.append(el('p', { class: 'msg-text msg-gone', text: 'Сообщение удалено' }));
     } else {
       if (message.content) {
-        body.append(el('p', { class: 'msg-text' }, withMentions(message.content, message.mentions)));
+        body.append(el('div', { class: 'msg-text' }, renderRich(message.content, { mentions: mentionTokens(message) })));
+        const link = firstLink(message.content);
+        if (link) body.append(linkPreview(link));
       }
+      if (message.poll) body.append(pollView(message));
       if (message.attachment) body.append(attachmentView(message.attachment));
       if (message.reactions?.length) body.append(reactionsRow(message));
     }
@@ -349,7 +521,7 @@ export function createChat({
     if (own && !message.deleted) body.append(receipt(message));
 
     return el('article', { class: classes.join(' '), 'data-id': message.id }, [
-      el('div', { class: 'msg-avatar', text: initial(message.author_name) }),
+      avatarNode(message.author_name, message.author_avatar_url, 'msg-avatar'),
       body,
       !message.deleted && !root && toolbar(message, own),
     ]);
@@ -402,6 +574,8 @@ export function createChat({
     input.disabled = false;
     sendButton.disabled = false;
     attachButton.disabled = false;
+    micButton.disabled = false;
+    pollButton.disabled = false;
     feed.replaceChildren(topSlot);
     topSlot.textContent = '';
   }
@@ -624,7 +798,7 @@ export function createChat({
       try {
         const { message: updated } = await api(`/messages/${message.id}`, {
           method: 'PATCH',
-          body: { content, mentions: mentionsIn(content) },
+          body: { content, mentions: mentionsIn(content), tag_mentions: tagMentionsIn(content) },
         });
         editing = null;
         redraw(message.id, { ...updated, read_count: item.message.read_count });
@@ -712,16 +886,37 @@ export function createChat({
 
   // ===== поле ввода =====
 
-  const input = el('input', {
-    class: 'input',
-    type: 'text',
+  // Многострочное поле: Enter отправляет, Shift+Enter — новая строка.
+  const input = el('textarea', {
+    class: 'input composer-input',
+    rows: '1',
     // Тот же предел, что и на сервере: лучше не дать набрать лишнее,
     // чем показать ошибку после отправки.
     maxlength: '2000',
     autocomplete: 'off',
     placeholder: 'Выберите канал',
     disabled: 'true',
+    title: 'Enter — отправить, Shift+Enter — новая строка. **жирный**, *курсив*, ~~зачёркнутый~~, `код`',
   });
+  const micButton = el(
+    'button',
+    { class: 'composer-icon', type: 'button', title: 'Записать голосовое', 'aria-label': 'Записать голосовое', disabled: 'true' },
+    [icon('mic', 18)],
+  );
+  const pollButton = el(
+    'button',
+    { class: 'composer-icon', type: 'button', title: 'Создать опрос', 'aria-label': 'Создать опрос', disabled: 'true' },
+    [icon('poll', 16)],
+  );
+  const recordTime = el('span', { class: 'record-time', text: '0:00' });
+  const recordBar = el('div', { class: 'record-bar' }, [
+    el('span', { class: 'record-dot' }),
+    recordTime,
+    el('span', { class: 'record-label', text: 'Идёт запись голосового' }),
+    el('button', { class: 'btn btn-ghost btn-sm', type: 'button', text: 'Отмена', onclick: () => stopRecording(true) }),
+    el('button', { class: 'btn btn-primary btn-sm', type: 'button', text: 'Отправить', onclick: () => stopRecording(false) }),
+  ]);
+  recordBar.hidden = true;
   const fileInput = el('input', { type: 'file', accept: FILE_TYPES.join(','), class: 'visually-hidden' });
   const attachButton = el(
     'button',
@@ -749,6 +944,25 @@ export function createChat({
     return members
       .filter((m) => m.id !== me && hasToken(text, `@${m.name}`))
       .map((m) => m.id);
+  }
+
+  function tagMentionsIn(text) {
+    return tags.filter((t) => hasToken(text, `@${t.name}`)).map((t) => t.id);
+  }
+
+  // Поле растёт вместе с текстом, но не выше примерно восьми строк.
+  function autosize() {
+    input.style.height = 'auto';
+    input.style.height = `${Math.min(input.scrollHeight, 200)}px`;
+  }
+
+  // Ctrl+B / Ctrl+I — обернуть выделенное в разметку.
+  function wrapSelection(mark) {
+    const { selectionStart: start, selectionEnd: end, value } = input;
+    const selected = value.slice(start, end);
+    input.value = value.slice(0, start) + mark + selected + mark + value.slice(end);
+    input.setSelectionRange(start + mark.length, end + mark.length);
+    autosize();
   }
 
   function startReply(message) {
@@ -809,20 +1023,25 @@ export function createChat({
     }
   }
 
-  // Подсказка упоминаний: после «@» показываем участников, чьё имя
-  // содержит набранное.
+  // Подсказка упоминаний: после «@» показываем теги и участников, чьё
+  // имя содержит набранное. Тег упоминает всех, у кого он есть.
   function updateSuggestions() {
     const before = input.value.slice(0, input.selectionStart);
     const match = before.match(/(^|\s)@([^\s@]*)$/);
     if (!match) return hideSuggestions();
     const typed = match[2].toLowerCase();
-    suggestions = members
-      .filter((m) => m.id !== me && m.name.toLowerCase().includes(typed))
-      .slice(0, 6);
+    suggestions = [
+      ...tags
+        .filter((t) => t.name.toLowerCase().includes(typed))
+        .map((t) => ({ name: t.name, tag: t })),
+      ...members
+        .filter((m) => m.id !== me && m.name.toLowerCase().includes(typed))
+        .map((m) => ({ name: m.name, member: m })),
+    ].slice(0, 8);
     if (suggestions.length === 0) return hideSuggestions();
     suggestIndex = Math.min(suggestIndex, suggestions.length - 1);
     suggestBox.replaceChildren(
-      ...suggestions.map((m, i) =>
+      ...suggestions.map((s, i) =>
         el(
           'button',
           {
@@ -830,9 +1049,18 @@ export function createChat({
             type: 'button',
             role: 'option',
             // mousedown, а не click: иначе поле потеряет фокус раньше.
-            onmousedown: (e) => (e.preventDefault(), chooseSuggestion(m)),
+            onmousedown: (e) => (e.preventDefault(), chooseSuggestion(s)),
           },
-          [el('span', { class: 'reader-avatar', text: initial(m.name) }), el('span', { text: m.name })],
+          s.tag
+            ? [
+              el('span', { class: `reader-avatar mention-tag tag-${s.tag.color}`, text: '#' }),
+              el('span', { text: s.name }),
+              el('span', { class: 'mention-hint', text: `все с тегом · ${s.tag.member_count ?? ''}`.replace(/ · $/, '') }),
+            ]
+            : [
+              avatarNode(s.name, s.member.avatar_url, 'reader-avatar'),
+              el('span', { text: s.name }),
+            ],
         ),
       ),
     );
@@ -855,6 +1083,7 @@ export function createChat({
   }
 
   input.addEventListener('input', () => {
+    autosize();
     updateSuggestions();
     // «Печатает…» отправляется не на каждую букву, а раз в пару секунд.
     if (channel && input.value.trim() && Date.now() - lastTypingSent > TYPING_SEND_EVERY_MS) {
@@ -878,6 +1107,23 @@ export function createChat({
         return;
       }
       if (event.key === 'Escape') return hideSuggestions();
+    }
+    // Enter — отправить, Shift+Enter — новая строка. Пока идёт набор
+    // через IME (иероглифы, автозамена), Enter принадлежит ему.
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      send();
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && (event.key === 'b' || event.key === 'и')) {
+      event.preventDefault();
+      wrapSelection('**');
+      return;
+    }
+    if ((event.ctrlKey || event.metaKey) && (event.key === 'i' || event.key === 'ш')) {
+      event.preventDefault();
+      wrapSelection('*');
+      return;
     }
     if (event.key === 'Escape' && replyTo) cancelReply();
     // Стрелка вверх в пустом поле — правка своего последнего сообщения.
@@ -905,13 +1151,19 @@ export function createChat({
     const content = input.value.trim();
     if (!content && !attachment) return;
 
-    const body = { channel_id: channel.id, content, mentions: mentionsIn(content) };
+    const body = {
+      channel_id: channel.id,
+      content,
+      mentions: mentionsIn(content),
+      tag_mentions: tagMentionsIn(content),
+    };
     if (replyTo) body.reply_to = replyTo.id;
     if (attachment) body.attachment_id = attachment.id;
     if (thread) body.thread_id = thread.id;
     const draft = { value: input.value, replyTo, attachment };
 
     input.value = '';
+    autosize();
     lastTypingSent = 0;
     cancelReply();
     clearAttachment();
@@ -935,6 +1187,205 @@ export function createChat({
       }
       showError(err.message);
     }
+  }
+
+  // Отправка готового сообщения без текста: голосовое или опрос.
+  async function postExtra(extra) {
+    const body = { channel_id: channel.id, content: '', ...extra };
+    if (thread) body.thread_id = thread.id;
+    const { message } = await api('/messages', { method: 'POST', body });
+    if (hasNewer) return open(channel);
+    if (items.has(message.id)) redraw(message.id, message);
+    else append(message);
+    if (isThread) redrawThreadDivider();
+  }
+
+  // ===== голосовые =====
+
+  let recorder = null;
+  let recordChunks = [];
+  let recordStart = 0;
+  let recordTimer = null;
+  let recordCancelled = false;
+
+  function showRecording(on) {
+    recordBar.hidden = !on;
+    form.hidden = on;
+  }
+
+  async function startRecording() {
+    if (!channel || recorder) return;
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      return showError('Этот браузер не умеет записывать звук');
+    }
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      return showError('Нет доступа к микрофону — разрешите его в настройках браузера');
+    }
+    const mime = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4', 'audio/webm']
+      .find((t) => MediaRecorder.isTypeSupported(t)) ?? '';
+    recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    recordChunks = [];
+    recordCancelled = false;
+    recorder.addEventListener('dataavailable', (e) => {
+      if (e.data.size) recordChunks.push(e.data);
+    });
+    recorder.addEventListener('stop', async () => {
+      stream.getTracks().forEach((t) => t.stop());
+      clearInterval(recordTimer);
+      const duration = Date.now() - recordStart;
+      const type = (recorder.mimeType || mime || 'audio/webm').split(';')[0];
+      recorder = null;
+      showRecording(false);
+      // Случайное короткое нажатие — не сообщение.
+      if (recordCancelled || duration < 500) return;
+      await sendVoice(new Blob(recordChunks, { type }), type, duration);
+    });
+    recorder.start(250);
+    recordStart = Date.now();
+    recordTime.textContent = '0:00';
+    showRecording(true);
+    recordTimer = setInterval(() => {
+      const elapsed = Date.now() - recordStart;
+      recordTime.textContent = formatClock(elapsed / 1000);
+      if (elapsed >= MAX_VOICE_MS) stopRecording(false);
+    }, 250);
+  }
+
+  function stopRecording(cancel) {
+    recordCancelled = cancel;
+    if (recorder?.state === 'recording') recorder.stop();
+  }
+
+  async function sendVoice(blob, type, durationMs) {
+    const ext = type === 'audio/mp4' ? 'm4a' : type.split('/')[1];
+    uploading = true;
+    sendButton.disabled = true;
+    try {
+      const { attachment: voice } = await uploadFile(
+        `/attachments?channel_id=${channel.id}&filename=voice.${ext}&duration_ms=${Math.round(durationMs)}`,
+        blob,
+      );
+      await postExtra({ attachment_id: voice.id });
+    } catch (err) {
+      showError(err.message);
+    } finally {
+      uploading = false;
+      sendButton.disabled = false;
+    }
+  }
+
+  // ===== опросы =====
+
+  function showPollDialog() {
+    if (!channel) return;
+    const question = el('input', { class: 'input', type: 'text', maxlength: '200', placeholder: 'Например, когда созвонимся?' });
+    const optionsBox = el('div', { class: 'poll-edit-options' });
+    const multiple = el('input', { type: 'checkbox' });
+    const error = el('p', { class: 'field-error' });
+    const addButton = el('button', { class: 'btn btn-ghost btn-sm', type: 'button', text: '+ Вариант' });
+
+    function addOption(value = '') {
+      if (optionsBox.children.length >= POLL_MAX_OPTIONS) return;
+      const field = el('input', { class: 'input', type: 'text', maxlength: '100', placeholder: `Вариант ${optionsBox.children.length + 1}`, value });
+      const row = el('div', { class: 'poll-edit-row' }, [
+        field,
+        el('button', {
+          class: 'composer-bar-close',
+          type: 'button',
+          text: '✕',
+          title: 'Убрать вариант',
+          onclick: () => {
+            if (optionsBox.children.length > 2) row.remove();
+            addButton.hidden = optionsBox.children.length >= POLL_MAX_OPTIONS;
+          },
+        }),
+      ]);
+      optionsBox.append(row);
+      addButton.hidden = optionsBox.children.length >= POLL_MAX_OPTIONS;
+      return field;
+    }
+    addOption();
+    addOption();
+    addButton.addEventListener('click', () => addOption()?.focus());
+
+    async function create() {
+      const options = [...optionsBox.querySelectorAll('input')].map((i) => i.value.trim()).filter(Boolean);
+      try {
+        await postExtra({
+          poll: { question: question.value.trim(), options, multiple: multiple.checked },
+        });
+        scrim.remove();
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    }
+
+    const scrim = el('div', { class: 'modal-scrim' }, [
+      el('form', { class: 'modal', onsubmit: (e) => (e.preventDefault(), create()) }, [
+        el('h2', { class: 'modal-title', text: 'Новый опрос' }),
+        el('div', { class: 'field' }, [el('span', { class: 'field-label', text: 'Вопрос' }), question]),
+        el('div', { class: 'field' }, [el('span', { class: 'field-label', text: 'Варианты' }), optionsBox, addButton]),
+        el('label', { class: 'check' }, [multiple, el('span', { text: 'Можно выбрать несколько вариантов' })]),
+        el('div', { class: 'modal-actions' }, [
+          el('button', { class: 'btn btn-secondary', type: 'button', text: 'Отмена', onclick: () => scrim.remove() }),
+          el('button', { class: 'btn btn-primary', type: 'submit', text: 'Создать опрос' }),
+        ]),
+        error,
+      ]),
+    ]);
+    scrim.addEventListener('click', (e) => {
+      if (e.target === scrim) scrim.remove();
+    });
+    document.getElementById('app').append(scrim);
+    question.focus();
+  }
+
+  micButton.addEventListener('click', startRecording);
+  pollButton.addEventListener('click', showPollDialog);
+
+  // ===== жалобы =====
+
+  function showReportForm(message, anchor) {
+    let reason = null;
+    const comment = el('input', { class: 'input', type: 'text', maxlength: '500', placeholder: 'Комментарий — по желанию' });
+    const status = el('p', { class: 'report-status' });
+    const reasons = el('div', { class: 'report-reasons' });
+    reasons.replaceChildren(
+      ...REPORT_REASONS.map(([id, label]) => el('button', {
+        class: 'report-reason',
+        type: 'button',
+        text: label,
+        onclick: (e) => {
+          reason = id;
+          reasons.querySelectorAll('.report-reason').forEach((b) => b.classList.toggle('is-active', b === e.currentTarget));
+        },
+      })),
+    );
+    const submit = el('button', {
+      class: 'btn btn-primary btn-sm',
+      type: 'button',
+      text: 'Отправить модераторам',
+      onclick: async () => {
+        if (!reason) {
+          status.textContent = 'Выберите причину';
+          return;
+        }
+        submit.disabled = true;
+        try {
+          await api(`/messages/${message.id}/report`, { method: 'POST', body: { reason, comment: comment.value } });
+          status.textContent = 'Жалоба отправлена. Спасибо!';
+          setTimeout(closePopover, 1400);
+        } catch (err) {
+          submit.disabled = false;
+          status.textContent = err.message;
+        }
+      },
+    });
+    showPopover(anchor, [el('p', { class: 'readers-title', text: 'Пожаловаться на сообщение' }), reasons, comment, submit, status]);
+    openPopover.classList.add('popover-report');
   }
 
   // Файл можно просто перетащить в окно чата.
@@ -969,17 +1420,25 @@ export function createChat({
     drawTyping();
   }
 
+  const form = el('form', { class: 'composer', onsubmit: (e) => (e.preventDefault(), send()) }, [
+    attachButton,
+    pollButton,
+    fileInput,
+    input,
+    micButton,
+    sendButton,
+  ]);
   const composer = el('div', { class: 'composer-wrap' }, [
     suggestBox,
     replyBar,
     attachBar,
-    el('form', { class: 'composer', onsubmit: (e) => (e.preventDefault(), send()) }, [
-      attachButton,
-      fileInput,
-      input,
-      sendButton,
+    form,
+    recordBar,
+    el('div', { class: 'composer-foot' }, [
+      typingLine,
+      composerError,
+      el('span', { class: 'composer-hint', text: '**жирный** *курсив* `код` · Shift+Enter — новая строка' }),
     ]),
-    el('div', { class: 'composer-foot' }, [typingLine, composerError]),
   ]);
 
   // ===== события из сокета =====
@@ -1050,6 +1509,11 @@ export function createChat({
     if (isThread) redrawThreadDivider();
   }
 
+  function onPoll({ message_id: messageId, channel_id: channelId, poll }) {
+    if (channelId !== channel?.id || !items.has(messageId)) return;
+    redraw(messageId, { poll });
+  }
+
   function onReactions({ id, channel_id: channelId, reactions }) {
     if (channelId !== channel?.id) return;
     redraw(id, { reactions });
@@ -1100,6 +1564,7 @@ export function createChat({
     node,
     head,
     redrawAll,
+    onPoll,
     title,
     subtitle,
     open,

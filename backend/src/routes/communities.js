@@ -9,7 +9,9 @@ import {
   requireMembership, requirePermission, hasPermission, permissionsFor, ROLE_RANK,
 } from '../lib/access.js';
 import { parseUuid } from '../lib/validate.js';
-import { PUBLIC_NAME_SQL } from '../lib/users.js';
+import { PUBLIC_NAME_SQL, publicNameSql } from '../lib/users.js';
+import { avatarUrl } from '../lib/signed-urls.js';
+import { rawBody, contentTypeOf, saveUpload, IMAGE_TYPES } from './attachments.js';
 import { evictFromCommunity, isOnline, emitToCommunity } from '../lib/realtime.js';
 
 export const communitiesRouter = Router();
@@ -51,7 +53,7 @@ async function listTags(communityId) {
 // Участник так, как его видят остальные: имя, роль, теги, в сети ли.
 async function listMembers(communityId, userId = null) {
   const { rows } = await query(
-    `SELECT u.id, ${PUBLIC_NAME_SQL} AS name, m.role, m.joined_at,
+    `SELECT u.id, ${PUBLIC_NAME_SQL} AS name, m.role, m.joined_at, u.avatar_id,
             COALESCE(
               (SELECT json_agg(json_build_object('id', t.id, 'name', t.name, 'color', t.color)
                                ORDER BY t.created_at)
@@ -66,7 +68,11 @@ async function listMembers(communityId, userId = null) {
     [communityId, userId],
   );
   // «В сети» — есть хотя бы одно открытое соединение по WebSocket.
-  return rows.map((m) => ({ ...m, online: isOnline(m.id) }));
+  return rows.map(({ avatar_id: avatarId, ...m }) => ({
+    ...m,
+    avatar_url: avatarUrl(avatarId),
+    online: isOnline(m.id),
+  }));
 }
 
 // Изменился участник (роль, теги) — открытые вкладки перерисуют подписи.
@@ -184,7 +190,11 @@ communitiesRouter.get(
       totals.set(row.community_id, total);
     }
     res.json({
-      communities: rows.map((c) => ({ ...c, ...(totals.get(c.id) ?? { unread: 0, mentions: 0 }) })),
+      communities: rows.map(({ avatar_id: avatarId, ...c }) => ({
+        ...c,
+        avatar_url: avatarUrl(avatarId),
+        ...(totals.get(c.id) ?? { unread: 0, mentions: 0 }),
+      })),
     });
   }),
 );
@@ -249,7 +259,13 @@ communitiesRouter.get(
       [req.params.id],
     );
 
-    res.json({ community: rows[0], channels, role, permissions: permissionsFor(role) });
+    const { avatar_id: avatarId, ...community } = rows[0];
+    res.json({
+      community: { ...community, avatar_url: avatarUrl(avatarId) },
+      channels,
+      role,
+      permissions: permissionsFor(role),
+    });
   }),
 );
 
@@ -476,23 +492,36 @@ communitiesRouter.post(
 // или модератор, и только того, кто младше по роли: модератор не
 // исключает модератора и тем более владельца. Владелец уйти не может:
 // сообщество осталось бы без хозяина, а передачи прав пока нет.
+// Проверка «можно ли убрать этого человека»: право на исключение и
+// старшинство. Для бана та же проверка — бан строже исключения.
+async function checkCanRemove(actorRole, communityId, targetId) {
+  if (!hasPermission(actorRole, 'kick_members')) throw new HttpError(403, 'not_allowed');
+  const { rows: target } = await query(
+    'SELECT role FROM community_members WHERE community_id = $1 AND user_id = $2',
+    [communityId, targetId],
+  );
+  if (target.length === 0) return null;
+  if (ROLE_RANK[target[0].role] >= ROLE_RANK[actorRole]) {
+    throw new HttpError(403, 'cannot_remove_equal_or_higher');
+  }
+  return target[0].role;
+}
+
 async function removeMember({ actorId, communityId, targetId, res }) {
   const actorRole = await requireMembership(actorId, communityId);
   const isSelf = actorId === targetId;
 
   if (isSelf && actorRole === 'owner') throw new HttpError(400, 'owner_cannot_leave');
-  if (!isSelf) {
-    if (!hasPermission(actorRole, 'kick_members')) throw new HttpError(403, 'not_allowed');
-    const { rows: target } = await query(
-      'SELECT role FROM community_members WHERE community_id = $1 AND user_id = $2',
-      [communityId, targetId],
-    );
-    if (target.length === 0) throw new HttpError(404, 'member_not_found');
-    if (ROLE_RANK[target[0].role] >= ROLE_RANK[actorRole]) {
-      throw new HttpError(403, 'cannot_remove_equal_or_higher');
-    }
+  if (!isSelf && (await checkCanRemove(actorRole, communityId, targetId)) === null) {
+    throw new HttpError(404, 'member_not_found');
   }
+  await detachMember({ actorId, communityId, targetId, isSelf });
+  res.json({ left: true, reason: isSelf ? 'left' : 'removed' });
+}
 
+// Убрать человека из сообщества: членство, теги, открытые вкладки,
+// событие аналитики. Общая часть выхода, исключения и бана.
+async function detachMember({ actorId, communityId, targetId, isSelf, banned = false }) {
   const { rows } = await withTransaction(async (client) => {
     const result = await client.query(
       `DELETE FROM community_members
@@ -526,10 +555,12 @@ async function removeMember({ actorId, communityId, targetId, res }) {
     community_id: communityId,
     reason: isSelf ? 'left' : 'removed',
     removed_by: isSelf ? null : actorId,
+    // Бан в аналитике — то же исключение, с пометкой: причина остаётся
+    // из привычного набора, и витрины не нужно переделывать.
+    ...(banned ? { banned: true } : {}),
   });
 
   emitToCommunity(communityId, 'member_removed', { community_id: communityId, user_id: targetId });
-  res.json({ left: true, reason: isSelf ? 'left' : 'removed' });
 }
 
 communitiesRouter.delete(
@@ -548,5 +579,121 @@ communitiesRouter.delete(
     const communityId = parseUuid(req.params.id, 'community_id');
     const targetId = parseUuid(req.params.userId, 'user_id');
     await removeMember({ actorId: req.user.id, communityId, targetId, res });
+  }),
+);
+
+// ===== бан =====
+// Исключённый может вернуться по любой действующей ссылке, забаненный —
+// нет, пока его не разбанят. Банить можно и того, кого уже исключили.
+
+const BAN_REASON_MAX = 200;
+
+communitiesRouter.get(
+  '/:id/bans',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const communityId = parseUuid(req.params.id, 'community_id');
+    await requirePermission(req.user.id, communityId, 'kick_members');
+    const { rows } = await query(
+      `SELECT b.user_id, ${PUBLIC_NAME_SQL} AS name, b.reason, b.created_at,
+              ${publicNameSql('by_u')} AS banned_by_name
+       FROM community_bans b
+       JOIN users u ON u.id = b.user_id
+       LEFT JOIN users by_u ON by_u.id = b.banned_by
+       WHERE b.community_id = $1
+       ORDER BY b.created_at DESC`,
+      [communityId],
+    );
+    res.json({ bans: rows });
+  }),
+);
+
+communitiesRouter.post(
+  '/:id/bans',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const communityId = parseUuid(req.params.id, 'community_id');
+    const targetId = parseUuid(req.body?.user_id, 'user_id');
+    const reason = String(req.body?.reason ?? '').trim().slice(0, BAN_REASON_MAX) || null;
+    const actorRole = await requireMembership(req.user.id, communityId);
+    if (targetId === req.user.id) throw new HttpError(400, 'cannot_ban_yourself');
+
+    const targetRole = await checkCanRemove(actorRole, communityId, targetId);
+    // Не участник — забанить можно только того, кто в сообществе бывал:
+    // иначе бан превращается в способ узнавать чужие id.
+    if (targetRole === null) {
+      const { rows } = await query(
+        `SELECT 1 FROM events_bronze
+         WHERE event_type = 'community_joined'
+           AND payload->>'community_id' = $1 AND payload->>'user_id' = $2
+         LIMIT 1`,
+        [communityId, targetId],
+      );
+      if (rows.length === 0) throw new HttpError(404, 'member_not_found');
+    }
+
+    await query(
+      `INSERT INTO community_bans (community_id, user_id, banned_by, reason)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (community_id, user_id) DO UPDATE SET reason = EXCLUDED.reason`,
+      [communityId, targetId, req.user.id, reason],
+    );
+    if (targetRole !== null) {
+      await detachMember({ actorId: req.user.id, communityId, targetId, isSelf: false, banned: true });
+    }
+    res.status(201).json({ banned: true });
+  }),
+);
+
+communitiesRouter.delete(
+  '/:id/bans/:userId',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const communityId = parseUuid(req.params.id, 'community_id');
+    const targetId = parseUuid(req.params.userId, 'user_id');
+    await requirePermission(req.user.id, communityId, 'kick_members');
+    const { rowCount } = await query(
+      'DELETE FROM community_bans WHERE community_id = $1 AND user_id = $2',
+      [communityId, targetId],
+    );
+    if (rowCount === 0) throw new HttpError(404, 'ban_not_found');
+    res.status(204).end();
+  }),
+);
+
+// ===== аватарка сообщества =====
+const COMMUNITY_AVATAR_MAX_BYTES = 2 * 1024 * 1024;
+
+communitiesRouter.post(
+  '/:id/avatar',
+  requireAuth,
+  rawBody(COMMUNITY_AVATAR_MAX_BYTES),
+  asyncHandler(async (req, res) => {
+    const communityId = parseUuid(req.params.id, 'community_id');
+    await requirePermission(req.user.id, communityId, 'manage_community');
+    const mimeType = contentTypeOf(req);
+    if (!IMAGE_TYPES.has(mimeType)) {
+      throw new HttpError(415, 'unsupported_file_type', { allowed: [...IMAGE_TYPES] });
+    }
+    const file = await saveUpload({
+      buffer: req.body,
+      mimeType,
+      filename: 'community-avatar',
+      uploaderId: req.user.id,
+      communityId,
+    });
+    await query('UPDATE communities SET avatar_id = $2 WHERE id = $1', [communityId, file.id]);
+    res.json({ avatar_url: avatarUrl(file.id) });
+  }),
+);
+
+communitiesRouter.delete(
+  '/:id/avatar',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const communityId = parseUuid(req.params.id, 'community_id');
+    await requirePermission(req.user.id, communityId, 'manage_community');
+    await query('UPDATE communities SET avatar_id = NULL WHERE id = $1', [communityId]);
+    res.json({ avatar_url: null });
   }),
 );

@@ -148,6 +148,28 @@ const ICONS = {
       ['path', { d: 'M2.4 3h11.2v7.8H7.2L4.2 13.4v-2.6H2.4z', stroke: 'currentColor', 'stroke-width': 1.3, 'stroke-linejoin': 'round' }],
     ],
   },
+  play: {
+    box: 16,
+    shapes: [['path', { d: 'M5 3.2v9.6l7.6-4.8z', fill: 'currentColor' }]],
+  },
+  pause: {
+    box: 16,
+    shapes: [
+      ['path', { d: 'M4.5 3h2.5v10H4.5zM9 3h2.5v10H9z', fill: 'currentColor' }],
+    ],
+  },
+  flag: {
+    box: 16,
+    shapes: [
+      ['path', { d: 'M3.5 14V2.5M3.5 3h8.5l-1.8 3 1.8 3H3.5', stroke: 'currentColor', 'stroke-width': 1.3, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }],
+    ],
+  },
+  poll: {
+    box: 16,
+    shapes: [
+      ['path', { d: 'M3 13V8M8 13V3M13 13v-7', stroke: 'currentColor', 'stroke-width': 1.8, 'stroke-linecap': 'round' }],
+    ],
+  },
   alert: {
     box: 18,
     shapes: [

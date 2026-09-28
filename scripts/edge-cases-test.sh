@@ -374,6 +374,130 @@ check "модератор исключает участника" 200 "$(status D
 check "с исключённого теги сняты" 0 \
   "$(curl -sf "$API/communities/$CID/tags" -H "authorization: Bearer $OWNER" | jq '[.tags[].member_count]|add')"
 
+echo '--- упоминание по тегу ---'
+VERA="$(login "edge-vera-$S@example.com")"
+VERA_ID="$(curl -sf "$API/users/me" -H "authorization: Bearer $VERA" | jq -r .user.id)"
+curl -sf -X POST "$API/invites/$FRESH/join" -H 'content-type: application/json' \
+  -H "authorization: Bearer $VERA" -d '{}' > /dev/null
+curl -sf -X PUT "$API/communities/$CID/members/$VERA_ID/tags" -H 'content-type: application/json' \
+  -H "authorization: Bearer $OWNER" -d "{\"tag_ids\":[\"$TAG2\"]}" > /dev/null
+check "упоминание тега отправляется" 201 \
+  "$(status POST "$API/messages" "{\"channel_id\":\"$TEXT\",\"content\":\"@9 класс завтра контрольная\",\"tag_mentions\":[\"$TAG2\"]}" "$MOD")"
+check "в сообщении виден упомянутый тег" "9 класс" "$(jq -r '.message.tag_mentions[0].name' "$TMP/out.json")"
+check "у носителя тега — упоминание" 1 \
+  "$(curl -sf "$API/communities/$CID/unread" -H "authorization: Bearer $VERA" \
+     | jq --arg ch "$TEXT" '.channels[]|select(.channel_id==$ch)|.mentions')"
+check "тег чужого сообщества не упомянуть" 400 \
+  "$(status POST "$API/messages" "{\"channel_id\":\"$TEXT\",\"content\":\"@чужой\",\"tag_mentions\":[\"$FOREIGN_TAG\"]}" "$OWNER")"
+check "в личке тегов нет" 400 \
+  "$(status POST "$API/messages" "{\"channel_id\":\"$DM\",\"content\":\"@9 класс\",\"tag_mentions\":[\"$TAG2\"]}" "$OWNER")"
+
+echo '--- опросы ---'
+check "опрос создаётся" 201 \
+  "$(status POST "$API/messages" "{\"channel_id\":\"$TEXT\",\"content\":\"\",\"poll\":{\"question\":\"Когда созвон?\",\"options\":[\"Вторник\",\"Среда\"]}}" "$OWNER")"
+POLL="$(jq -r .message.poll.id "$TMP/out.json")"
+OPT_A="$(jq -r '.message.poll.options[0].id' "$TMP/out.json")"
+OPT_B="$(jq -r '.message.poll.options[1].id' "$TMP/out.json")"
+check "опрос из одного варианта не создаётся" 400 \
+  "$(status POST "$API/messages" "{\"channel_id\":\"$TEXT\",\"poll\":{\"question\":\"?\",\"options\":[\"да\"]}}" "$OWNER")"
+check "одинаковые варианты отклоняются" 400 \
+  "$(status POST "$API/messages" "{\"channel_id\":\"$TEXT\",\"poll\":{\"question\":\"?\",\"options\":[\"Да\",\"да\"]}}" "$OWNER")"
+check "голос принимается" 1 \
+  "$(status PUT "$API/polls/$POLL/vote" "{\"option_ids\":[\"$OPT_A\"]}" "$VERA" > /dev/null; jq '.poll.voters' "$TMP/out.json")"
+check "в опросе с одним ответом два варианта нельзя" 400 \
+  "$(status PUT "$API/polls/$POLL/vote" "{\"option_ids\":[\"$OPT_A\",\"$OPT_B\"]}" "$VERA")"
+check "переголосовать можно" "0 1" \
+  "$(status PUT "$API/polls/$POLL/vote" "{\"option_ids\":[\"$OPT_B\"]}" "$VERA" > /dev/null; \
+     jq -r '[.poll.options[].voter_ids|length]|join(" ")' "$TMP/out.json")"
+check "посторонний не голосует" 403 "$(status PUT "$API/polls/$POLL/vote" "{\"option_ids\":[\"$OPT_A\"]}" "$OUTSIDER")"
+check "участник чужой опрос не закрывает" 403 "$(status POST "$API/polls/$POLL/close" '' "$VERA")"
+check "модератор закрывает опрос" 200 "$(status POST "$API/polls/$POLL/close" '' "$MOD")"
+check "в закрытом опросе не голосуют" 410 "$(status PUT "$API/polls/$POLL/vote" "{\"option_ids\":[\"$OPT_A\"]}" "$VERA")"
+
+echo '--- жалобы ---'
+RUDE="$(send "$MOD" "{\"channel_id\":\"$TEXT\",\"content\":\"грубость\"}")"
+check "жалоба отправляется" 201 "$(status POST "$API/messages/$RUDE/report" '{"reason":"abuse","comment":"хамит"}' "$VERA")"
+check "повторная жалоба не дублируется" 200 "$(status POST "$API/messages/$RUDE/report" '{"reason":"abuse"}' "$VERA")"
+check "выдуманная причина отклоняется" 400 "$(status POST "$API/messages/$RUDE/report" '{"reason":"скучно"}' "$OWNER")"
+check "на своё жаловаться нельзя" 400 "$(status POST "$API/messages/$RUDE/report" '{"reason":"spam"}' "$MOD")"
+check "участник очередь жалоб не видит" 403 "$(status GET "$API/communities/$CID/reports" '' "$VERA")"
+check "модератор видит жалобу" 1 \
+  "$(curl -sf "$API/communities/$CID/reports" -H "authorization: Bearer $MOD" \
+     | jq --arg id "$RUDE" '[.items[]|select(.message.id==$id)|.reports[]]|length')"
+check "жалобу можно отклонить" 200 "$(status POST "$API/communities/$CID/reports/$RUDE/resolve" '{"action":"dismiss"}' "$OWNER")"
+check "после отклонения очередь пуста" 0 \
+  "$(curl -sf "$API/communities/$CID/reports/count" -H "authorization: Bearer $OWNER" | jq .open_count)"
+status POST "$API/messages/$RUDE/report" '{"reason":"abuse"}' "$VERA" > /dev/null
+check "по жалобе сообщение удаляется" 200 "$(status POST "$API/communities/$CID/reports/$RUDE/resolve" '{"action":"delete"}' "$OWNER")"
+check "удалённое по жалобе действительно удалено" true \
+  "$(curl -sf "$API/messages?channel_id=$TEXT" -H "authorization: Bearer $OWNER" \
+     | jq --arg id "$RUDE" '.messages[]|select(.id==$id)|.deleted')"
+DM_MSG="$(curl -sf "$API/messages?channel_id=$DM" -H "authorization: Bearer $OWNER" \
+  | jq -r --arg me "$OWNER_ID" '[.messages[]|select(.user_id!=$me)][0].id')"
+check "в личке жалоб нет" 400 "$(status POST "$API/messages/$DM_MSG/report" '{"reason":"spam"}' "$OWNER")"
+
+echo '--- бан ---'
+VICTIM="$(login "edge-victim-$S@example.com")"
+VICTIM_ID="$(curl -sf "$API/users/me" -H "authorization: Bearer $VICTIM" | jq -r .user.id)"
+curl -sf -X POST "$API/invites/$FRESH/join" -H 'content-type: application/json' \
+  -H "authorization: Bearer $VICTIM" -d '{}' > /dev/null
+check "участник не банит" 403 "$(status POST "$API/communities/$CID/bans" "{\"user_id\":\"$VICTIM_ID\"}" "$VERA")"
+check "модератор банит" 201 \
+  "$(status POST "$API/communities/$CID/bans" "{\"user_id\":\"$VICTIM_ID\",\"reason\":\"спам\"}" "$MOD")"
+check "забаненный теряет доступ" 403 "$(status GET "$API/communities/$CID" '' "$VICTIM")"
+check "забаненный не возвращается по ссылке" 403 "$(status POST "$API/invites/$FRESH/join" '{}' "$VICTIM")"
+check "причина понятна" banned_from_community "$(jq -r .error "$TMP/out.json")"
+check "список банов с причиной" "спам" \
+  "$(curl -sf "$API/communities/$CID/bans" -H "authorization: Bearer $MOD" \
+     | jq -r --arg id "$VICTIM_ID" '.bans[]|select(.user_id==$id)|.reason')"
+check "участник список банов не видит" 403 "$(status GET "$API/communities/$CID/bans" '' "$VERA")"
+check "модератор не банит владельца" 403 "$(status POST "$API/communities/$CID/bans" "{\"user_id\":\"$OWNER_ID\"}" "$MOD")"
+check "себя забанить нельзя" 400 "$(status POST "$API/communities/$CID/bans" "{\"user_id\":\"$MOD_ID\"}" "$MOD")"
+check "незнакомца не забанить" 404 "$(status POST "$API/communities/$CID/bans" "{\"user_id\":\"$OUTSIDER_ID\"}" "$OWNER")"
+check "бывшего участника забанить можно" 201 \
+  "$(status POST "$API/communities/$CID/bans" "{\"user_id\":\"$CHATTER_ID\"}" "$OWNER")"
+check "разбан" 204 "$(status DELETE "$API/communities/$CID/bans/$VICTIM_ID" '' "$MOD")"
+check "после разбана можно вернуться" 201 "$(status POST "$API/invites/$FRESH/join" '{}' "$VICTIM")"
+
+echo '--- голосовые и аватарки ---'
+head -c 2048 /dev/urandom > "$TMP/voice.webm"
+check "голосовое загружается" 201 \
+  "$(curl -s -o "$TMP/out.json" -w '%{http_code}' -X POST \
+     "$API/attachments?channel_id=$TEXT&filename=voice.webm&duration_ms=3500" \
+     -H "authorization: Bearer $OWNER" -H 'content-type: audio/webm' --data-binary @"$TMP/voice.webm")"
+check "это звук, длительность сохранена" "true 3500" "$(jq -r '"\(.attachment.is_audio) \(.attachment.duration_ms)"' "$TMP/out.json")"
+VOICE_URL="$(jq -r .attachment.url "$TMP/out.json")"
+check "голосовое отдаётся кусками (перемотка)" 206 \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H 'range: bytes=0-99' "$API$VOICE_URL")"
+check "отрицательная длительность отклоняется" 400 \
+  "$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+     "$API/attachments?channel_id=$TEXT&filename=v.webm&duration_ms=-1" \
+     -H "authorization: Bearer $OWNER" -H 'content-type: audio/webm' --data-binary @"$TMP/voice.webm")"
+avatar() { # avatar ТОКЕН путь тип файл
+  curl -s -o "$TMP/out.json" -w '%{http_code}' -X POST "$API$2" \
+    -H "authorization: Bearer $1" -H "content-type: $3" --data-binary @"$4"
+}
+check "аватарка загружается" 200 "$(avatar "$OWNER" /users/me/avatar image/png "$TMP/pic.png")"
+check "у профиля появилась ссылка" true "$(jq '.user.avatar_url != null' "$TMP/out.json")"
+check "аватарка видна в составе" true \
+  "$(curl -sf "$API/communities/$CID/members" -H "authorization: Bearer $VERA" \
+     | jq --arg id "$OWNER_ID" '.members[]|select(.id==$id)|.avatar_url != null')"
+check "SVG аватаркой не принимается" 415 "$(avatar "$OWNER" /users/me/avatar image/svg+xml "$TMP/pic.png")"
+head -c 3000000 /dev/zero > "$TMP/big-avatar.png"
+check "слишком большая аватарка — 413" 413 "$(avatar "$OWNER" /users/me/avatar image/png "$TMP/big-avatar.png")"
+check "аватарку сообщества меняет только владелец" 403 \
+  "$(avatar "$MOD" "/communities/$CID/avatar" image/png "$TMP/pic.png")"
+check "владелец ставит аватарку сообщества" 200 "$(avatar "$OWNER" "/communities/$CID/avatar" image/png "$TMP/pic.png")"
+
+echo '--- превью ссылок ---'
+for bad in 'http://127.0.0.1:3000/health' 'http://localhost/' 'file:///etc/passwd' \
+           'http://169.254.169.254/latest/meta-data' 'http://[::1]/' 'http://10.0.0.1/' \
+           'http://example.com:8080/' 'http://user:pass@example.com/' 'http://2130706433/'; do
+  check "превью во внутреннюю сеть закрыто: $bad" 400 \
+    "$(status GET "$API/link-preview?url=$(jq -rn --arg u "$bad" '$u|@uri')" '' "$OWNER")"
+done
+check "превью без входа недоступно" 401 "$(status GET "$API/link-preview?url=https%3A%2F%2Fexample.com")"
+
 echo '--- вход по коду ---'
 BRUTE="edge-brute-$S@example.com"
 REAL="$(curl -sf -X POST "$API/auth/send-code" -H 'content-type: application/json' \
