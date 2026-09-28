@@ -22,7 +22,7 @@ import { query } from '../db.js';
 import { config } from '../config.js';
 import { asyncHandler, HttpError } from '../lib/http.js';
 import { requireAuth } from '../middleware/auth.js';
-import { requireMembership } from '../lib/access.js';
+import { requireMembership, getChannel, requireChannelAccess, isChatChannel } from '../lib/access.js';
 import { parseUuid } from '../lib/validate.js';
 
 export const attachmentsRouter = Router();
@@ -75,8 +75,20 @@ attachmentsRouter.post(
   requireAuth,
   express.raw({ type: () => true, limit: config.attachments.maxBytes }),
   asyncHandler(async (req, res) => {
-    const communityId = parseUuid(req.query.community_id, 'community_id');
-    await requireMembership(req.user.id, communityId);
+    // Файл загружается в канал (в том числе в личную переписку). Старый
+    // способ — в сообщество целиком — оставлен для совместимости.
+    let communityId = null;
+    let channelId = null;
+    if (req.query.channel_id) {
+      const channel = await getChannel(parseUuid(req.query.channel_id, 'channel_id'));
+      if (!isChatChannel(channel)) throw new HttpError(400, 'channel_is_not_text');
+      await requireChannelAccess(req.user.id, channel);
+      channelId = channel.id;
+      communityId = channel.community_id;
+    } else {
+      communityId = parseUuid(req.query.community_id, 'community_id');
+      await requireMembership(req.user.id, communityId);
+    }
 
     const mimeType = String(req.get('content-type') ?? '').split(';')[0].trim().toLowerCase();
     if (!ALLOWED_TYPES.has(mimeType)) {
@@ -88,10 +100,10 @@ attachmentsRouter.post(
 
     const filename = cleanFilename(req.query.filename);
     const { rows } = await query(
-      `INSERT INTO attachments (community_id, uploader_id, filename, mime_type, size_bytes)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO attachments (community_id, channel_id, uploader_id, filename, mime_type, size_bytes)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING id, filename, mime_type, size_bytes`,
-      [communityId, req.user.id, filename, mimeType, req.body.length],
+      [communityId, channelId, req.user.id, filename, mimeType, req.body.length],
     );
     const attachment = rows[0];
 

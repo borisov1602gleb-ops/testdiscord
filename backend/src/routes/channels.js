@@ -4,9 +4,9 @@ import { Router } from 'express';
 import { query } from '../db.js';
 import { asyncHandler, HttpError } from '../lib/http.js';
 import { requireAuth } from '../middleware/auth.js';
-import { requireMembership, getChannel } from '../lib/access.js';
+import { getChannel, requireChannelAccess, isChatChannel } from '../lib/access.js';
 import { parseUuid } from '../lib/validate.js';
-import { emitToCommunity } from '../lib/realtime.js';
+import { emitToChannel } from '../lib/realtime.js';
 
 export const channelsRouter = Router();
 
@@ -16,8 +16,8 @@ channelsRouter.post(
   asyncHandler(async (req, res) => {
     const channelId = parseUuid(req.params.id, 'channel_id');
     const channel = await getChannel(channelId);
-    if (channel.type !== 'text') throw new HttpError(400, 'channel_is_not_text');
-    await requireMembership(req.user.id, channel.community_id);
+    if (!isChatChannel(channel)) throw new HttpError(400, 'channel_is_not_text');
+    await requireChannelAccess(req.user.id, channel);
 
     // Время ставит сервер, а не клиент: иначе можно было бы отметить
     // прочитанным то, что ещё не написано. Отметка только растёт.
@@ -37,7 +37,7 @@ channelsRouter.post(
     const { last_read_at: lastReadAt, previous } = rows[0];
 
     if (!previous || lastReadAt > previous) {
-      emitToCommunity(channel.community_id, 'read_updated', {
+      emitToChannel(channel, 'read_updated', {
         channel_id: channelId,
         user_id: req.user.id,
         last_read_at: lastReadAt,

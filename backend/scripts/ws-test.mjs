@@ -59,6 +59,56 @@ console.log('✅ WebSocket доставил сообщение:', {
   content: message.content,
 });
 
+function waitFor(sock, event, match, what) {
+  return new Promise((resolve, reject) => {
+    const handler = (payload) => {
+      if (!match(payload)) return;
+      sock.off(event, handler);
+      resolve(payload);
+    };
+    sock.on(event, handler);
+    setTimeout(() => reject(new Error(`${what}: не пришло за 5 сек`)), 5000);
+  });
+}
+
+// Второй участник: «в сети» и «печатает…» должны доходить до владельца.
+const member = await login(`ws-member-${stamp}@example.com`);
+const { invite } = await api('/invites', {
+  method: 'POST', token: owner.token, body: { community_id: community.community.id },
+});
+await api(`/invites/${invite.id}/join`, { method: 'POST', token: member.token, body: {} });
+await socket.emitWithAck('join_community', community.community.id);
+
+const cameOnline = waitFor(socket, 'presence', (p) => p.user_id === member.user.id && p.online, 'presence online');
+const memberSocket = io(API, { auth: { token: member.token } });
+await cameOnline;
+console.log('✅ Владелец увидел, что участник в сети');
+
+const typing = waitFor(socket, 'typing', (p) => p.user_id === member.user.id, 'typing');
+memberSocket.emit('typing', { channel_id: textChannel.id });
+const typingEvent = await typing;
+if (typingEvent.channel_id !== textChannel.id) throw new Error('typing пришёл не для того канала');
+console.log('✅ «Печатает…» дошло до владельца');
+
+const wentOffline = waitFor(socket, 'presence', (p) => p.user_id === member.user.id && !p.online, 'presence offline');
+memberSocket.close();
+await wentOffline;
+console.log('✅ Владелец увидел, что участник вышел');
+
+// Посторонний не может слать «печатает» в чужой канал.
+const outsider = await login(`ws-outsider-${stamp}@example.com`);
+const outsiderSocket = io(API, { auth: { token: outsider.token } });
+await new Promise((resolve) => outsiderSocket.on('connect', resolve));
+let leaked = false;
+const leakHandler = (p) => { if (p.user_id === outsider.user.id) leaked = true; };
+socket.on('typing', leakHandler);
+outsiderSocket.emit('typing', { channel_id: textChannel.id });
+await new Promise((resolve) => setTimeout(resolve, 800));
+socket.off('typing', leakHandler);
+outsiderSocket.close();
+if (leaked) throw new Error('посторонний смог отправить «печатает» в чужой канал');
+console.log('✅ Посторонний не может слать «печатает» в чужой канал');
+
 // Неавторизованное подключение должно отклоняться.
 const anonSocket = io(API, { auth: {} });
 const rejected = await new Promise((resolve) => {

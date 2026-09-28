@@ -8,7 +8,7 @@ import { logEvent, EVENT_TYPES } from '../lib/events.js';
 import { requireMembership } from '../lib/access.js';
 import { parseUuid } from '../lib/validate.js';
 import { PUBLIC_NAME_SQL } from '../lib/users.js';
-import { evictFromCommunity } from '../lib/realtime.js';
+import { evictFromCommunity, isOnline } from '../lib/realtime.js';
 
 export const communitiesRouter = Router();
 
@@ -69,7 +69,10 @@ async function unreadByChannel(userId, communityId = null) {
   const { rows } = await query(
     `SELECT ch.community_id, ch.id AS channel_id,
             COALESCE(cr.last_read_at, cm.joined_at) AS last_read_at,
-            count(m.id)::int AS unread,
+            -- Сообщения тредов в счётчик канала не входят: в общей ленте
+            -- их не видно. Упоминание в треде считается — его нельзя
+            -- пропустить.
+            count(m.id) FILTER (WHERE m.thread_id IS NULL)::int AS unread,
             count(mm.message_id)::int AS mentions
      FROM community_members cm
      JOIN channels ch ON ch.community_id = cm.community_id AND ch.type = 'text'
@@ -194,7 +197,8 @@ communitiesRouter.get(
       [communityId],
     );
 
-    res.json({ members: rows });
+    // «В сети» — есть хотя бы одно открытое соединение по WebSocket.
+    res.json({ members: rows.map((m) => ({ ...m, online: isOnline(m.id) })) });
   }),
 );
 

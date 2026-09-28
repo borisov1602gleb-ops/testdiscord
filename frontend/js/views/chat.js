@@ -1,7 +1,9 @@
-// Чат текстового канала: лента с подгрузкой старых сообщений, правка и
-// удаление своих, ответы, реакции, упоминания, вложения и отметки «кто
-// просмотрел». Экран сообщества (home.js) ведёт список каналов и сокет,
-// а сюда передаёт события, относящиеся к открытому каналу.
+// Чат канала: лента с подгрузкой старых сообщений и переходом к нужному
+// месту, правка и удаление, ответы, треды, реакции, упоминания, вложения,
+// закреплённые, «печатает…» и «кто просмотрел». Один и тот же модуль
+// работает для канала сообщества, личной переписки и треда (боковая
+// панель). Экран (home.js) ведёт список каналов и сокет, а сюда передаёт
+// события, относящиеся к открытому каналу.
 import { api, uploadFile } from '../api.js';
 import { store } from '../store.js';
 import { el, formatTime, icon, initial } from '../dom.js';
@@ -17,6 +19,9 @@ const FILE_TYPES = [
 // Насколько близко к низу ленты считается «внизу»: тогда новые сообщения
 // прокручивают ленту сами, а если человек читает старое — не мешают.
 const BOTTOM_SLACK = 120;
+// «Печатает…» гаснет, если человек замолчал.
+const TYPING_SHOW_MS = 4500;
+const TYPING_SEND_EVERY_MS = 2500;
 const LETTER_OR_DIGIT = /[\p{L}\p{N}]/u;
 
 function formatSize(bytes) {
@@ -25,10 +30,18 @@ function formatSize(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} МБ`;
 }
 
-function formatFull(iso) {
+export function formatFull(iso) {
   return new Date(iso).toLocaleString('ru-RU', {
     day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit',
   });
+}
+
+function repliesLabel(n) {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return `${n} ответ`;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return `${n} ответа`;
+  return `${n} ответов`;
 }
 
 // «@Имя» считается упоминанием, только если сразу за именем не идёт буква
@@ -44,15 +57,34 @@ function hasToken(text, token) {
   }
 }
 
-export function createChat({ community, role, members, onRead }) {
+// Параметры:
+//  community — сообщество (null для личной переписки);
+//  role      — роль в сообществе: владельцу можно удалять чужое и закреплять;
+//  members   — кого можно упомянуть;
+//  thread    — корневое сообщение, если это чат треда;
+//  onRead, onOpenThread, onAuthorClick, onTyping — связи с экраном.
+export function createChat({
+  community = null,
+  role = 'member',
+  members = [],
+  thread = null,
+  onRead,
+  onOpenThread,
+  onAuthorClick,
+  onTyping,
+}) {
   const me = store.user?.id;
   const isOwner = role === 'owner';
+  const isThread = Boolean(thread);
 
   let channel = null;
   let openToken = 0; // защищает от гонки при быстром переключении каналов
   let hasMore = false;
+  let hasNewer = false;
   let loadingOlder = false;
+  let loadingNewer = false;
   let oldestId = null;
+  let newestId = null;
   let pinned = true; // лента прокручена к низу
   let readTimer = null;
   let replyTo = null;
@@ -61,24 +93,29 @@ export function createChat({ community, role, members, onRead }) {
   let suggestions = [];
   let suggestIndex = 0;
   let openPopover = null;
-  const items = new Map(); // id → { message, node }
+  let lastTypingSent = 0;
+  const typers = new Map(); // user_id → { name, until }
+  const items = new Map(); // id → { message, node, options }
+
+  const canPin = () => channel?.type === 'direct' || isOwner;
 
   // ===== лента =====
 
   const title = el('span', { class: 'chat-title' });
+  const subtitle = el('span', { class: 'chat-subtitle' });
   const topSlot = el('p', { class: 'feed-start' });
   const feed = el('div', { class: 'chat-feed', onscroll: onFeedScroll });
   const jumpButton = el('button', {
     class: 'jump-new',
     type: 'button',
     text: 'Новые сообщения ↓',
-    onclick: () => scrollToBottom(true),
+    onclick: () => (hasNewer ? open(channel) : scrollToBottom(true)),
   });
   jumpButton.hidden = true;
   // Лента становится ниже, когда над полем ввода появляется плашка ответа
   // или файла. Прижатая к низу лента остаётся прижатой.
   new ResizeObserver(() => {
-    if (pinned) feed.scrollTop = feed.scrollHeight;
+    if (pinned && !hasNewer) feed.scrollTop = feed.scrollHeight;
   }).observe(feed);
 
   function nearBottom() {
@@ -92,13 +129,19 @@ export function createChat({ community, role, members, onRead }) {
   }
 
   function onFeedScroll() {
-    pinned = nearBottom();
+    pinned = nearBottom() && !hasNewer;
     if (pinned) jumpButton.hidden = true;
     if (feed.scrollTop < 200) loadOlder();
+    if (hasNewer && nearBottom()) loadNewer();
   }
 
   function drawTopSlot() {
+    if (isThread) {
+      topSlot.textContent = '';
+      return;
+    }
     if (hasMore) topSlot.textContent = loadingOlder ? 'Загружаем раньше…' : '';
+    else if (channel?.type === 'direct') topSlot.textContent = 'Это начало переписки';
     else topSlot.textContent = channel ? `Это начало канала #${channel.name}` : '';
   }
 
@@ -126,6 +169,12 @@ export function createChat({ community, role, members, onRead }) {
     return out;
   }
 
+  function flash(node) {
+    node.scrollIntoView({ block: 'center' });
+    node.classList.add('is-flash');
+    setTimeout(() => node.classList.remove('is-flash'), 1600);
+  }
+
   function replyQuote(reply) {
     return el(
       'button',
@@ -135,10 +184,8 @@ export function createChat({ community, role, members, onRead }) {
         title: 'Показать исходное сообщение',
         onclick: () => {
           const target = items.get(reply.id)?.node;
-          if (!target) return;
-          target.scrollIntoView({ block: 'center', behavior: 'smooth' });
-          target.classList.add('is-flash');
-          setTimeout(() => target.classList.remove('is-flash'), 1200);
+          if (target) flash(target);
+          else if (!isThread) open(channel, { aroundId: reply.id });
         },
       },
       [
@@ -189,23 +236,31 @@ export function createChat({ community, role, members, onRead }) {
   // отправлено, две — кто-то уже прочитал. По нажатию — список прочитавших.
   function receipt(message) {
     const count = message.read_count ?? 0;
+    const direct = channel?.type === 'direct';
+    const label = count > 0 ? (direct ? 'Прочитано' : `Просмотрели: ${count}`) : 'Отправлено';
     const button = el(
       'button',
-      {
-        class: `msg-receipt${count > 0 ? ' is-read' : ''}`,
-        type: 'button',
-        title: 'Кто просмотрел',
-      },
-      [
-        icon(count > 0 ? 'checks' : 'check', 14),
-        el('span', { text: count > 0 ? `Просмотрели: ${count}` : 'Отправлено' }),
-      ],
+      { class: `msg-receipt${count > 0 ? ' is-read' : ''}`, type: 'button', title: 'Кто просмотрел' },
+      [icon(count > 0 ? 'checks' : 'check', 14), el('span', { text: label })],
     );
     button.addEventListener('click', (event) => {
       event.stopPropagation();
       showReaders(message, button);
     });
     return button;
+  }
+
+  function threadSummary(message) {
+    return el(
+      'button',
+      { class: 'msg-thread', type: 'button', onclick: () => onOpenThread?.(message) },
+      [
+        icon('thread', 14),
+        el('span', { class: 'msg-thread-count', text: repliesLabel(message.thread_count) }),
+        message.thread_last_at &&
+          el('span', { class: 'msg-thread-last', text: `последний в ${formatTime(message.thread_last_at)}` }),
+      ],
+    );
   }
 
   function tool(label, iconName, onclick, extraClass = '') {
@@ -223,6 +278,12 @@ export function createChat({ community, role, members, onRead }) {
       showReactionPicker(message, reactButton);
     });
     bar.append(tool('Ответить', 'reply', () => startReply(message)), reactButton);
+    if (!isThread && !message.thread_id && onOpenThread) {
+      bar.append(tool('Обсудить в треде', 'thread', () => onOpenThread(message)));
+    }
+    if (!isThread && !message.thread_id && canPin()) {
+      bar.append(tool(message.pinned ? 'Открепить' : 'Закрепить', 'pin', () => togglePin(message)));
+    }
     if (own) bar.append(tool('Изменить', 'pencil', () => startEdit(message)));
     if (own || isOwner) {
       // Удаление в два нажатия: первое спрашивает, второе удаляет.
@@ -240,20 +301,33 @@ export function createChat({ community, role, members, onRead }) {
     return bar;
   }
 
-  function build(message) {
+  function build(message, { root = false } = {}) {
     const own = message.user_id === me;
     const mentioned = message.mentions?.some((m) => m.user_id === me);
     const classes = ['msg'];
     if (own) classes.push('msg-own');
     if (mentioned) classes.push('msg-mentioned');
     if (message.deleted) classes.push('msg-deleted');
+    if (message.pinned) classes.push('msg-pinned');
+    if (root) classes.push('msg-root');
+
+    const author = own || !onAuthorClick
+      ? el('span', { class: 'msg-author', text: message.author_name ?? '' })
+      : el('button', {
+        class: 'msg-author msg-author-link',
+        type: 'button',
+        title: 'Написать лично',
+        text: message.author_name ?? '',
+        onclick: () => onAuthorClick(message.user_id),
+      });
 
     const body = el('div', { class: 'msg-body' }, [
       el('div', { class: 'msg-head' }, [
-        el('span', { class: 'msg-author', text: message.author_name ?? '' }),
+        author,
         el('span', { class: 'msg-time', text: formatTime(message.created_at), title: formatFull(message.created_at) }),
         message.edited_at && !message.deleted &&
           el('span', { class: 'msg-edited', text: 'изменено', title: formatFull(message.edited_at) }),
+        message.pinned && el('span', { class: 'msg-pin-mark' }, [icon('pin', 12), 'закреплено']),
       ]),
       message.reply && replyQuote(message.reply),
     ]);
@@ -266,19 +340,20 @@ export function createChat({ community, role, members, onRead }) {
       }
       if (message.attachment) body.append(attachmentView(message.attachment));
       if (message.reactions?.length) body.append(reactionsRow(message));
-      if (own) body.append(receipt(message));
     }
+    if (!isThread && !message.thread_id && message.thread_count > 0) body.append(threadSummary(message));
+    if (own && !message.deleted) body.append(receipt(message));
 
     return el('article', { class: classes.join(' '), 'data-id': message.id }, [
       el('div', { class: 'msg-avatar', text: initial(message.author_name) }),
       body,
-      !message.deleted && toolbar(message, own),
+      !message.deleted && !root && toolbar(message, own),
     ]);
   }
 
-  function put(message) {
-    const node = build(message);
-    items.set(message.id, { message, node });
+  function put(message, options) {
+    const node = build(message, options);
+    items.set(message.id, { message, node, options });
     return node;
   }
 
@@ -289,7 +364,7 @@ export function createChat({ community, role, members, onRead }) {
     // внизу, пусть там и остаётся.
     const stick = pinned;
     item.message = { ...item.message, ...patch };
-    const fresh = build(item.message);
+    const fresh = build(item.message, item.options);
     item.node.replaceWith(fresh);
     item.node = fresh;
     if (stick) scrollToBottom();
@@ -300,45 +375,69 @@ export function createChat({ community, role, members, onRead }) {
     feed.querySelector('.empty-quiet')?.remove();
     const wasPinned = pinned || nearBottom();
     feed.append(put(message));
+    newestId = message.id;
     if (wasPinned || message.user_id === me) scrollToBottom();
     else jumpButton.hidden = false;
   }
 
-  // ===== загрузка =====
-
-  async function open(next, { lastReadAt } = {}) {
-    const token = ++openToken;
+  function resetFeed(next) {
     channel = next;
     hasMore = false;
+    hasNewer = false;
     loadingOlder = false;
+    loadingNewer = false;
     oldestId = null;
+    newestId = null;
     items.clear();
+    typers.clear();
+    drawTyping();
     cancelReply();
     cancelEdit();
-    title.textContent = `# ${next.name}`;
-    input.placeholder = `Написать в #${next.name}`;
+    closePopover();
+    jumpButton.hidden = true;
     input.disabled = false;
     sendButton.disabled = false;
     attachButton.disabled = false;
     feed.replaceChildren(topSlot);
     topSlot.textContent = '';
+  }
 
-    const { messages, has_more: more } = await api(
-      `/messages?channel_id=${next.id}&limit=${PAGE_SIZE}`,
-    );
+  // ===== загрузка =====
+
+  // lastReadAt — где провести черту «Новые сообщения»; aroundId — к какому
+  // сообщению перейти (из поиска, закреплённых или цитаты).
+  async function open(next, { lastReadAt, aroundId, title: heading, placeholder } = {}) {
+    const token = ++openToken;
+    resetFeed(next);
+    if (heading !== undefined) title.textContent = heading;
+    else if (!isThread) title.textContent = next.type === 'direct' ? next.name : `# ${next.name}`;
+    input.placeholder = placeholder
+      ?? (isThread ? 'Ответить в треде' : next.type === 'direct' ? 'Написать сообщение' : `Написать в #${next.name}`);
+
+    if (isThread) return openThread(token);
+
+    const url = aroundId
+      ? `/messages?channel_id=${next.id}&around=${aroundId}`
+      : `/messages?channel_id=${next.id}&limit=${PAGE_SIZE}`;
+    const { messages, has_more: more, has_newer: newer } = await api(url);
     if (token !== openToken) return;
     hasMore = more;
+    hasNewer = Boolean(newer);
     oldestId = messages[0]?.id ?? null;
+    newestId = messages.at(-1)?.id ?? null;
     drawTopSlot();
 
     if (messages.length === 0) {
-      feed.append(el('p', { class: 'empty-quiet', text: 'Пока ни одного сообщения — напишите первым' }));
+      feed.append(el('p', {
+        class: 'empty-quiet',
+        text: next.type === 'direct' ? 'Начните переписку' : 'Пока ни одного сообщения — напишите первым',
+      }));
     }
     // Черта «Новые сообщения» — перед первым непрочитанным чужим.
     let divider = null;
     for (const message of messages) {
       if (
-        !divider && lastReadAt && message.user_id !== me &&
+        !aroundId && !divider && lastReadAt && message.user_id !== me &&
         Date.parse(message.created_at) > Date.parse(lastReadAt)
       ) {
         divider = el('div', { class: 'feed-divider' }, [el('span', { text: 'Новые сообщения' })]);
@@ -346,12 +445,18 @@ export function createChat({ community, role, members, onRead }) {
       }
       feed.append(put(message));
     }
-    if (divider) {
+    if (aroundId && items.has(aroundId)) {
+      flash(items.get(aroundId).node);
+      pinned = false;
+      jumpButton.hidden = !hasNewer;
+      if (hasNewer) jumpButton.textContent = 'К последним сообщениям ↓';
+    } else if (divider) {
       divider.scrollIntoView({ block: 'center' });
       pinned = nearBottom();
     } else {
       scrollToBottom();
     }
+    if (!hasNewer) jumpButton.textContent = 'Новые сообщения ↓';
     markRead();
     // История короче экрана — прокрутки нет, и подгрузка по скроллу не
     // сработает. Догружаем сразу.
@@ -359,8 +464,29 @@ export function createChat({ community, role, members, onRead }) {
     input.focus();
   }
 
+  async function openThread(token) {
+    const { root, messages } = await api(`/messages?channel_id=${channel.id}&thread_id=${thread.id}`);
+    if (token !== openToken) return;
+    feed.append(
+      put(root, { root: true }),
+      el('div', { class: 'thread-divider', text: messages.length ? repliesLabel(messages.length) : 'Пока без ответов' }),
+    );
+    for (const message of messages) feed.append(put(message));
+    newestId = messages.at(-1)?.id ?? null;
+    scrollToBottom();
+    markRead();
+    input.focus();
+  }
+
+  function redrawThreadDivider() {
+    const divider = feed.querySelector('.thread-divider');
+    if (!divider) return;
+    const count = [...items.values()].filter((i) => i.message.thread_id === thread.id && !i.message.deleted).length;
+    divider.textContent = count ? repliesLabel(count) : 'Пока без ответов';
+  }
+
   async function loadOlder() {
-    if (!hasMore || loadingOlder || !channel || !oldestId) return;
+    if (isThread || !hasMore || loadingOlder || !channel || !oldestId) return;
     const token = openToken;
     loadingOlder = true;
     drawTopSlot();
@@ -390,11 +516,39 @@ export function createChat({ community, role, members, onRead }) {
     }
   }
 
+  // После перехода к старому сообщению лента «оторвана» от конца:
+  // прокрутка вниз догружает то, что было позже.
+  async function loadNewer() {
+    if (!hasNewer || loadingNewer || !channel || !newestId) return;
+    const token = openToken;
+    loadingNewer = true;
+    try {
+      const { messages, has_newer: newer } = await api(
+        `/messages?channel_id=${channel.id}&limit=${PAGE_SIZE}&after=${newestId}`,
+      );
+      if (token !== openToken) return;
+      for (const message of messages) {
+        if (!items.has(message.id)) feed.append(put(message));
+      }
+      newestId = messages.at(-1)?.id ?? newestId;
+      hasNewer = newer;
+      if (!hasNewer) {
+        jumpButton.hidden = true;
+        jumpButton.textContent = 'Новые сообщения ↓';
+        markRead();
+      }
+    } catch {
+      /* попробуем при следующей прокрутке */
+    } finally {
+      if (token === openToken) loadingNewer = false;
+    }
+  }
+
   // Отметка прочтения уходит с небольшой задержкой: пачка сообщений подряд
-  // даёт один запрос, а не десять. В фоновой вкладке не отмечаем —
-  // человек этого ещё не видел.
+  // даёт один запрос, а не десять. В фоновой вкладке и пока человек
+  // листает старое, не отмечаем — он этого ещё не видел.
   function markRead() {
-    if (!channel || document.hidden) return;
+    if (!channel || document.hidden || hasNewer) return;
     const channelId = channel.id;
     onRead?.(channelId);
     clearTimeout(readTimer);
@@ -418,10 +572,22 @@ export function createChat({ community, role, members, onRead }) {
     }
   }
 
+  async function togglePin(message) {
+    try {
+      const { message: updated } = await api(`/messages/${message.id}/pin`, {
+        method: 'PUT',
+        body: { pinned: !message.pinned },
+      });
+      redraw(message.id, { pinned: updated.pinned });
+    } catch (err) {
+      showError(err.message);
+    }
+  }
+
   async function remove(messageId) {
     try {
       await api(`/messages/${messageId}`, { method: 'DELETE' });
-      onDeleted({ id: messageId, channel_id: channel?.id });
+      onDeleted({ id: messageId, channel_id: channel?.id, thread_id: items.get(messageId)?.message.thread_id });
     } catch (err) {
       showError(err.message);
     }
@@ -549,7 +715,7 @@ export function createChat({ community, role, members, onRead }) {
     // чем показать ошибку после отправки.
     maxlength: '2000',
     autocomplete: 'off',
-    placeholder: 'Нет текстового канала',
+    placeholder: 'Выберите канал',
     disabled: 'true',
   });
   const fileInput = el('input', { type: 'file', accept: FILE_TYPES.join(','), class: 'visually-hidden' });
@@ -562,6 +728,7 @@ export function createChat({ community, role, members, onRead }) {
   const suggestBox = el('div', { class: 'mention-list', role: 'listbox' });
   const replyBar = el('div', { class: 'composer-bar' });
   const attachBar = el('div', { class: 'composer-bar' });
+  const typingLine = el('p', { class: 'typing-line', 'aria-live': 'polite' });
   const composerError = el('p', { class: 'field-error composer-error' });
   suggestBox.hidden = true;
   replyBar.hidden = true;
@@ -625,10 +792,7 @@ export function createChat({ community, role, members, onRead }) {
     drawAttachBar(`Загружаем ${file.name}…`, false);
     try {
       const name = encodeURIComponent(file.name || 'file');
-      const result = await uploadFile(
-        `/attachments?community_id=${community.id}&filename=${name}`,
-        file,
-      );
+      const result = await uploadFile(`/attachments?channel_id=${channel.id}&filename=${name}`, file);
       attachment = result.attachment;
       drawAttachBar(`${attachment.filename} · ${formatSize(attachment.size_bytes)}`, true);
     } catch (err) {
@@ -686,7 +850,14 @@ export function createChat({ community, role, members, onRead }) {
     input.focus();
   }
 
-  input.addEventListener('input', updateSuggestions);
+  input.addEventListener('input', () => {
+    updateSuggestions();
+    // «Печатает…» отправляется не на каждую букву, а раз в пару секунд.
+    if (channel && input.value.trim() && Date.now() - lastTypingSent > TYPING_SEND_EVERY_MS) {
+      lastTypingSent = Date.now();
+      onTyping?.({ channel_id: channel.id, thread_id: thread?.id ?? null });
+    }
+  });
   input.addEventListener('blur', () => setTimeout(hideSuggestions, 100));
   input.addEventListener('keydown', (event) => {
     if (!suggestBox.hidden) {
@@ -707,7 +878,8 @@ export function createChat({ community, role, members, onRead }) {
     if (event.key === 'Escape' && replyTo) cancelReply();
     // Стрелка вверх в пустом поле — правка своего последнего сообщения.
     if (event.key === 'ArrowUp' && !input.value) {
-      const mine = [...items.values()].reverse().find((i) => i.message.user_id === me && !i.message.deleted);
+      const mine = [...items.values()].reverse()
+        .find((i) => i.message.user_id === me && !i.message.deleted && !i.options?.root);
       if (mine) {
         event.preventDefault();
         startEdit(mine.message);
@@ -732,18 +904,23 @@ export function createChat({ community, role, members, onRead }) {
     const body = { channel_id: channel.id, content, mentions: mentionsIn(content) };
     if (replyTo) body.reply_to = replyTo.id;
     if (attachment) body.attachment_id = attachment.id;
+    if (thread) body.thread_id = thread.id;
     const draft = { value: input.value, replyTo, attachment };
 
     input.value = '';
+    lastTypingSent = 0;
     cancelReply();
     clearAttachment();
     showError('');
     try {
       const { message } = await api('/messages', { method: 'POST', body });
+      // Написал, находясь в «старой» части ленты, — возвращаемся к концу.
+      if (hasNewer) return open(channel);
       // Обычно сообщение приходит и по WebSocket; повтор отсекается по id.
       // Из ответа берём счётчик прочтений — в рассылке его нет.
       if (items.has(message.id)) redraw(message.id, message);
       else append(message);
+      if (isThread) redrawThreadDivider();
     } catch (err) {
       // Не теряем набранное: возвращаем текст, ответ и вложение.
       input.value = draft.value;
@@ -765,6 +942,29 @@ export function createChat({ community, role, members, onRead }) {
     pickFile(file);
   }
 
+  // ===== «печатает…» =====
+
+  let typingTimer = null;
+
+  function drawTyping() {
+    const now = Date.now();
+    for (const [id, t] of typers) if (t.until < now) typers.delete(id);
+    const names = [...typers.values()].map((t) => t.name);
+    if (names.length === 0) typingLine.textContent = '';
+    else if (names.length === 1) typingLine.textContent = `${names[0]} печатает…`;
+    else if (names.length === 2) typingLine.textContent = `${names[0]} и ${names[1]} печатают…`;
+    else typingLine.textContent = 'Несколько человек печатают…';
+    clearTimeout(typingTimer);
+    if (typers.size) typingTimer = setTimeout(drawTyping, 1000);
+  }
+
+  function onTypingEvent({ channel_id: channelId, thread_id: threadId, user_id: userId, name }) {
+    if (channelId !== channel?.id || userId === me) return;
+    if ((threadId ?? null) !== (thread?.id ?? null)) return;
+    typers.set(userId, { name, until: Date.now() + TYPING_SHOW_MS });
+    drawTyping();
+  }
+
   const composer = el('div', { class: 'composer-wrap' }, [
     suggestBox,
     replyBar,
@@ -775,15 +975,42 @@ export function createChat({ community, role, members, onRead }) {
       input,
       sendButton,
     ]),
-    composerError,
+    el('div', { class: 'composer-foot' }, [typingLine, composerError]),
   ]);
 
   // ===== события из сокета =====
 
+  function belongsHere(message) {
+    if (message.channel_id !== channel?.id) return false;
+    return isThread ? message.thread_id === thread.id : !message.thread_id;
+  }
+
   function onMessage(message) {
     if (message.channel_id !== channel?.id) return;
-    if (items.has(message.id)) return;
+    typers.delete(message.user_id);
+    drawTyping();
+    // Ответ в тред в общей ленте виден только счётчиком под корнем.
+    if (!isThread && message.thread_id) {
+      const root = items.get(message.thread_id);
+      if (root && !(root.seenReplies ??= new Set()).has(message.id)) {
+        root.seenReplies.add(message.id);
+        redraw(message.thread_id, {
+          thread_count: (root.message.thread_count ?? 0) + 1,
+          thread_last_at: message.created_at,
+        });
+      }
+      return;
+    }
+    if (!belongsHere(message) || items.has(message.id)) return;
+    // Лента сейчас показывает старое место — новое не вклеиваем в середину,
+    // а предлагаем перейти к концу.
+    if (hasNewer) {
+      jumpButton.hidden = false;
+      jumpButton.textContent = 'Есть новые сообщения ↓';
+      return;
+    }
     append(message);
+    if (isThread) redrawThreadDivider();
     if (message.user_id !== me) markRead();
   }
 
@@ -795,17 +1022,28 @@ export function createChat({ community, role, members, onRead }) {
     redraw(message.id, { ...message, read_count: current.read_count });
   }
 
-  function onDeleted({ id, channel_id: channelId }) {
-    if (channelId !== channel?.id || !items.has(id)) return;
+  function onDeleted({ id, channel_id: channelId, thread_id: threadId }) {
+    if (channelId !== channel?.id) return;
+    // Удалили ответ в треде — в общей ленте уменьшаем счётчик под корнем.
+    if (!isThread && threadId) {
+      const root = items.get(threadId);
+      if (root && !(root.deletedReplies ??= new Set()).has(id)) {
+        root.deletedReplies.add(id);
+        redraw(threadId, { thread_count: Math.max(0, (root.message.thread_count ?? 1) - 1) });
+      }
+      return;
+    }
+    if (!items.has(id) || items.get(id).message.deleted) return;
     if (editing?.id === id) editing = null;
     if (replyTo?.id === id) cancelReply();
-    redraw(id, { deleted: true, content: '', attachment: null, reactions: [], mentions: [] });
+    redraw(id, { deleted: true, content: '', attachment: null, reactions: [], mentions: [], pinned: false });
     // Ответы на удалённое тоже показывают, что его больше нет.
     for (const item of items.values()) {
       if (item.message.reply?.id === id) {
         redraw(item.message.id, { reply: { ...item.message.reply, deleted: true, snippet: '' } });
       }
     }
+    if (isThread) redrawThreadDivider();
   }
 
   function onReactions({ id, channel_id: channelId, reactions }) {
@@ -829,8 +1067,11 @@ export function createChat({ community, role, members, onRead }) {
     }
   }
 
-  const node = el('main', { class: 'chat' }, [
-    el('header', { class: 'chat-head' }, [title]),
+  const head = el('header', { class: 'chat-head' }, [
+    el('div', { class: 'chat-heading' }, [title, subtitle]),
+  ]);
+  const node = el('main', { class: `chat${isThread ? ' chat-thread' : ''}` }, [
+    head,
     el('div', { class: 'chat-feed-wrap' }, [feed, jumpButton]),
     composer,
   ]);
@@ -847,8 +1088,9 @@ export function createChat({ community, role, members, onRead }) {
 
   return {
     node,
-    head: node.querySelector('.chat-head'),
+    head,
     title,
+    subtitle,
     open,
     markRead,
     onMessage,
@@ -856,6 +1098,8 @@ export function createChat({ community, role, members, onRead }) {
     onDeleted,
     onReactions,
     onReadUpdate,
+    onTypingEvent,
+    focus: () => input.focus(),
     get channelId() {
       return channel?.id ?? null;
     },
