@@ -9,7 +9,7 @@ import { asyncHandler, HttpError } from '../lib/http.js';
 import { logEvent, EVENT_TYPES } from '../lib/events.js';
 import { requireAuth } from '../middleware/auth.js';
 import {
-  requireMembership, getChannel, requireChannelAccess, isChatChannel,
+  requireMembership, getChannel, requireChannelAccess, isChatChannel, hasPermission,
 } from '../lib/access.js';
 import { parseUuid } from '../lib/validate.js';
 import { emitToChannel } from '../lib/realtime.js';
@@ -219,10 +219,10 @@ async function saveMentions(client, messageId, userIds) {
   );
 }
 
-// Закреплять в сообществе может владелец — это его доска объявлений.
-// В личной переписке — любой из двоих.
+// Закреплять в сообществе может владелец или модератор. В личной
+// переписке — любой из двоих.
 function canPin(channel, role) {
-  return channel.type === 'direct' || role === 'owner';
+  return channel.type === 'direct' || hasPermission(role, 'pin_messages');
 }
 
 function parseLimit(raw) {
@@ -527,9 +527,10 @@ messagesRouter.delete(
   asyncHandler(async (req, res) => {
     const messageId = parseUuid(req.params.id, 'message_id');
     const target = await getMessageForUser(messageId, req.user.id);
-    // Удалить может автор, а владелец — любое сообщение в своём сообществе:
-    // это модерация.
-    if (target.user_id !== req.user.id && target.role !== 'owner') {
+    // Удалить может автор, а владелец и модератор — любое сообщение в
+    // сообществе: это модерация. В личке чужое не удаляется.
+    const moderates = target.channel.type !== 'direct' && hasPermission(target.role, 'delete_any_message');
+    if (target.user_id !== req.user.id && !moderates) {
       throw new HttpError(403, 'not_message_author');
     }
     if (target.deleted_at) return res.status(204).end();

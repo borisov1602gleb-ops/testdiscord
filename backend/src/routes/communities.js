@@ -5,10 +5,12 @@ import { query, withTransaction } from '../db.js';
 import { asyncHandler, HttpError } from '../lib/http.js';
 import { requireAuth } from '../middleware/auth.js';
 import { logEvent, EVENT_TYPES } from '../lib/events.js';
-import { requireMembership } from '../lib/access.js';
+import {
+  requireMembership, requirePermission, hasPermission, permissionsFor, ROLE_RANK,
+} from '../lib/access.js';
 import { parseUuid } from '../lib/validate.js';
 import { PUBLIC_NAME_SQL } from '../lib/users.js';
-import { evictFromCommunity, isOnline } from '../lib/realtime.js';
+import { evictFromCommunity, isOnline, emitToCommunity } from '../lib/realtime.js';
 
 export const communitiesRouter = Router();
 
@@ -18,12 +20,84 @@ const MAX_NAME_LENGTH = 60;
 const MAX_CHANNEL_NAME_LENGTH = 40;
 const MAX_CHANNELS = 20;
 
+// Теги: сколько всего в сообществе и сколько на одном человеке. Больше —
+// и подписи превращаются в шум рядом с каждым именем.
+const MAX_TAGS = 30;
+const MAX_TAGS_PER_MEMBER = 5;
+const MAX_TAG_NAME_LENGTH = 24;
+const TAG_COLORS = ['violet', 'blue', 'teal', 'green', 'yellow', 'orange', 'red', 'pink'];
+
 // Настраивать сообщество может только владелец. Отдельная проверка, а не
 // requireMembership: участник тоже состоит в сообществе, но менять его не может.
 async function requireOwner(userId, communityId) {
   const role = await requireMembership(userId, communityId);
   if (role !== 'owner') throw new HttpError(403, 'owner_only');
   return role;
+}
+
+async function listTags(communityId) {
+  const { rows } = await query(
+    `SELECT t.id, t.name, t.color,
+            (SELECT count(*)::int FROM member_tags mt
+             JOIN community_members cm ON cm.user_id = mt.user_id AND cm.community_id = t.community_id
+             WHERE mt.tag_id = t.id) AS member_count
+     FROM community_tags t WHERE t.community_id = $1
+     ORDER BY t.created_at`,
+    [communityId],
+  );
+  return rows;
+}
+
+// Участник так, как его видят остальные: имя, роль, теги, в сети ли.
+async function listMembers(communityId, userId = null) {
+  const { rows } = await query(
+    `SELECT u.id, ${PUBLIC_NAME_SQL} AS name, m.role, m.joined_at,
+            COALESCE(
+              (SELECT json_agg(json_build_object('id', t.id, 'name', t.name, 'color', t.color)
+                               ORDER BY t.created_at)
+               FROM member_tags mt JOIN community_tags t ON t.id = mt.tag_id
+               WHERE mt.user_id = u.id AND t.community_id = m.community_id),
+              '[]'::json
+            ) AS tags
+     FROM community_members m
+     JOIN users u ON u.id = m.user_id
+     WHERE m.community_id = $1 AND ($2::uuid IS NULL OR m.user_id = $2::uuid)
+     ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'moderator' THEN 1 ELSE 2 END, m.joined_at`,
+    [communityId, userId],
+  );
+  // «В сети» — есть хотя бы одно открытое соединение по WebSocket.
+  return rows.map((m) => ({ ...m, online: isOnline(m.id) }));
+}
+
+// Изменился участник (роль, теги) — открытые вкладки перерисуют подписи.
+async function announceMember(communityId, userId) {
+  const [member] = await listMembers(communityId, userId);
+  if (member) emitToCommunity(communityId, 'member_updated', { community_id: communityId, member });
+}
+
+function parseTagFields(body, { partial = false } = {}) {
+  const fields = {};
+  if (!partial || body?.name !== undefined) {
+    const name = String(body?.name ?? '').trim();
+    if (!name) throw new HttpError(400, 'name_required');
+    if (name.length > MAX_TAG_NAME_LENGTH) {
+      throw new HttpError(400, 'name_too_long', { max_length: MAX_TAG_NAME_LENGTH });
+    }
+    fields.name = name;
+  }
+  if (!partial || body?.color !== undefined) {
+    const color = String(body?.color ?? '');
+    if (!TAG_COLORS.includes(color)) throw new HttpError(400, 'invalid_tag_color', { allowed: TAG_COLORS });
+    fields.color = color;
+  }
+  return fields;
+}
+
+// Уникальность имени тега держит индекс в базе; его нарушение — это
+// понятная ошибка «такой тег уже есть», а не сбой сервера.
+function rethrowTagConflict(err) {
+  if (err.code === '23505') throw new HttpError(409, 'tag_exists');
+  throw err;
 }
 
 communitiesRouter.post(
@@ -175,7 +249,7 @@ communitiesRouter.get(
       [req.params.id],
     );
 
-    res.json({ community: rows[0], channels, role });
+    res.json({ community: rows[0], channels, role, permissions: permissionsFor(role) });
   }),
 );
 
@@ -185,20 +259,164 @@ communitiesRouter.get(
   asyncHandler(async (req, res) => {
     const communityId = parseUuid(req.params.id, 'community_id');
     await requireMembership(req.user.id, communityId);
-
     // Имя берём тем же выражением, что и в чате: как человек назвался, так
     // он и выглядит везде, включая скрытую почту.
+    const [members, tags] = await Promise.all([listMembers(communityId), listTags(communityId)]);
+    res.json({ members, tags });
+  }),
+);
+
+// Назначить или снять модератора. Только владелец; владельца самого
+// разжаловать нельзя — передачи прав пока нет.
+communitiesRouter.patch(
+  '/:id/members/:userId',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const communityId = parseUuid(req.params.id, 'community_id');
+    const targetId = parseUuid(req.params.userId, 'user_id');
+    await requirePermission(req.user.id, communityId, 'manage_roles');
+
+    const role = String(req.body?.role ?? '');
+    if (role !== 'moderator' && role !== 'member') throw new HttpError(400, 'invalid_role');
+
     const { rows } = await query(
-      `SELECT u.id, ${PUBLIC_NAME_SQL} AS name, m.role, m.joined_at
-       FROM community_members m
-       JOIN users u ON u.id = m.user_id
-       WHERE m.community_id = $1
-       ORDER BY (m.role = 'owner') DESC, m.joined_at`,
+      `UPDATE community_members SET role = $3
+       WHERE community_id = $1 AND user_id = $2 AND role <> 'owner'
+       RETURNING user_id`,
+      [communityId, targetId, role],
+    );
+    if (rows.length === 0) throw new HttpError(404, 'member_not_found');
+
+    await announceMember(communityId, targetId);
+    const [member] = await listMembers(communityId, targetId);
+    res.json({ member });
+  }),
+);
+
+// ===== теги =====
+
+communitiesRouter.get(
+  '/:id/tags',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const communityId = parseUuid(req.params.id, 'community_id');
+    await requireMembership(req.user.id, communityId);
+    res.json({ tags: await listTags(communityId) });
+  }),
+);
+
+communitiesRouter.post(
+  '/:id/tags',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const communityId = parseUuid(req.params.id, 'community_id');
+    await requirePermission(req.user.id, communityId, 'manage_tags');
+    const { name, color } = parseTagFields(req.body);
+
+    const { rows: countRows } = await query(
+      'SELECT count(*)::int AS total FROM community_tags WHERE community_id = $1',
       [communityId],
     );
+    if (countRows[0].total >= MAX_TAGS) throw new HttpError(409, 'too_many_tags', { max: MAX_TAGS });
 
-    // «В сети» — есть хотя бы одно открытое соединение по WebSocket.
-    res.json({ members: rows.map((m) => ({ ...m, online: isOnline(m.id) })) });
+    const { rows } = await query(
+      `INSERT INTO community_tags (community_id, name, color, created_by)
+       VALUES ($1, $2, $3, $4) RETURNING id, name, color`,
+      [communityId, name, color, req.user.id],
+    ).catch(rethrowTagConflict);
+    emitToCommunity(communityId, 'tags_updated', { community_id: communityId });
+    res.status(201).json({ tag: { ...rows[0], member_count: 0 } });
+  }),
+);
+
+communitiesRouter.patch(
+  '/:id/tags/:tagId',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const communityId = parseUuid(req.params.id, 'community_id');
+    const tagId = parseUuid(req.params.tagId, 'tag_id');
+    await requirePermission(req.user.id, communityId, 'manage_tags');
+    const fields = parseTagFields(req.body, { partial: true });
+    if (Object.keys(fields).length === 0) throw new HttpError(400, 'nothing_to_update');
+
+    const { rows } = await query(
+      `UPDATE community_tags
+       SET name = COALESCE($3, name), color = COALESCE($4, color)
+       WHERE id = $2 AND community_id = $1
+       RETURNING id, name, color`,
+      [communityId, tagId, fields.name ?? null, fields.color ?? null],
+    ).catch(rethrowTagConflict);
+    if (rows.length === 0) throw new HttpError(404, 'tag_not_found');
+    emitToCommunity(communityId, 'tags_updated', { community_id: communityId });
+    res.json({ tag: rows[0] });
+  }),
+);
+
+communitiesRouter.delete(
+  '/:id/tags/:tagId',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const communityId = parseUuid(req.params.id, 'community_id');
+    const tagId = parseUuid(req.params.tagId, 'tag_id');
+    await requirePermission(req.user.id, communityId, 'manage_tags');
+    // Снимается и со всех участников — это делает ON DELETE CASCADE.
+    const { rowCount } = await query(
+      'DELETE FROM community_tags WHERE id = $2 AND community_id = $1',
+      [communityId, tagId],
+    );
+    if (rowCount === 0) throw new HttpError(404, 'tag_not_found');
+    emitToCommunity(communityId, 'tags_updated', { community_id: communityId });
+    res.status(204).end();
+  }),
+);
+
+// Выставить участнику набор тегов целиком: что прислали — то и будет.
+// Так клиенту не нужно отдельно «добавить» и «снять».
+communitiesRouter.put(
+  '/:id/members/:userId/tags',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const communityId = parseUuid(req.params.id, 'community_id');
+    const targetId = parseUuid(req.params.userId, 'user_id');
+    await requirePermission(req.user.id, communityId, 'manage_tags');
+    await requireMembership(targetId, communityId).catch(() => {
+      throw new HttpError(404, 'member_not_found');
+    });
+
+    if (!Array.isArray(req.body?.tag_ids)) throw new HttpError(400, 'invalid_tags');
+    const tagIds = [...new Set(req.body.tag_ids.map((id) => parseUuid(id, 'tag_ids')))];
+    if (tagIds.length > MAX_TAGS_PER_MEMBER) {
+      throw new HttpError(400, 'too_many_member_tags', { max: MAX_TAGS_PER_MEMBER });
+    }
+    // Все теги должны быть из этого же сообщества.
+    if (tagIds.length) {
+      const { rows } = await query(
+        'SELECT count(*)::int AS total FROM community_tags WHERE community_id = $1 AND id = ANY($2::uuid[])',
+        [communityId, tagIds],
+      );
+      if (rows[0].total !== tagIds.length) throw new HttpError(400, 'invalid_tags');
+    }
+
+    await withTransaction(async (client) => {
+      await client.query(
+        `DELETE FROM member_tags
+         WHERE user_id = $2
+           AND tag_id IN (SELECT id FROM community_tags WHERE community_id = $1)
+           AND NOT (tag_id = ANY($3::uuid[]))`,
+        [communityId, targetId, tagIds],
+      );
+      if (tagIds.length) {
+        await client.query(
+          `INSERT INTO member_tags (tag_id, user_id, assigned_by)
+           SELECT unnest($1::uuid[]), $2, $3 ON CONFLICT DO NOTHING`,
+          [tagIds, targetId, req.user.id],
+        );
+      }
+    });
+
+    await announceMember(communityId, targetId);
+    const [member] = await listMembers(communityId, targetId);
+    res.json({ member });
   }),
 );
 
@@ -228,7 +446,7 @@ communitiesRouter.post(
   requireAuth,
   asyncHandler(async (req, res) => {
     const communityId = parseUuid(req.params.id, 'community_id');
-    await requireOwner(req.user.id, communityId);
+    await requirePermission(req.user.id, communityId, 'manage_channels');
 
     const name = String(req.body?.name ?? '').trim();
     const type = String(req.body?.type ?? '').trim();
@@ -254,22 +472,43 @@ communitiesRouter.post(
   }),
 );
 
-// Удаление участника: себя — любой, кроме владельца; другого — только
-// владелец. Владелец уйти не может: сообщество осталось бы без хозяина,
-// а передачи прав в MVP нет.
+// Удаление участника: себя — любой, кроме владельца; другого — владелец
+// или модератор, и только того, кто младше по роли: модератор не
+// исключает модератора и тем более владельца. Владелец уйти не может:
+// сообщество осталось бы без хозяина, а передачи прав пока нет.
 async function removeMember({ actorId, communityId, targetId, res }) {
   const actorRole = await requireMembership(actorId, communityId);
   const isSelf = actorId === targetId;
 
-  if (!isSelf && actorRole !== 'owner') throw new HttpError(403, 'owner_only');
   if (isSelf && actorRole === 'owner') throw new HttpError(400, 'owner_cannot_leave');
+  if (!isSelf) {
+    if (!hasPermission(actorRole, 'kick_members')) throw new HttpError(403, 'not_allowed');
+    const { rows: target } = await query(
+      'SELECT role FROM community_members WHERE community_id = $1 AND user_id = $2',
+      [communityId, targetId],
+    );
+    if (target.length === 0) throw new HttpError(404, 'member_not_found');
+    if (ROLE_RANK[target[0].role] >= ROLE_RANK[actorRole]) {
+      throw new HttpError(403, 'cannot_remove_equal_or_higher');
+    }
+  }
 
-  const { rows } = await query(
-    `DELETE FROM community_members
-     WHERE community_id = $1 AND user_id = $2 AND role <> 'owner'
-     RETURNING id`,
-    [communityId, targetId],
-  );
+  const { rows } = await withTransaction(async (client) => {
+    const result = await client.query(
+      `DELETE FROM community_members
+       WHERE community_id = $1 AND user_id = $2 AND role <> 'owner'
+       RETURNING id`,
+      [communityId, targetId],
+    );
+    // Теги этого сообщества уходят вместе с участником: вернётся —
+    // начнёт с чистого листа.
+    await client.query(
+      `DELETE FROM member_tags
+       WHERE user_id = $2 AND tag_id IN (SELECT id FROM community_tags WHERE community_id = $1)`,
+      [communityId, targetId],
+    );
+    return result;
+  });
   if (rows.length === 0) throw new HttpError(404, 'member_not_found');
 
   // Открытые вкладки исключённого сразу перестают получать события
@@ -289,6 +528,7 @@ async function removeMember({ actorId, communityId, targetId, res }) {
     removed_by: isSelf ? null : actorId,
   });
 
+  emitToCommunity(communityId, 'member_removed', { community_id: communityId, user_id: targetId });
   res.json({ left: true, reason: isSelf ? 'left' : 'removed' });
 }
 

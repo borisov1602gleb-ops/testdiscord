@@ -44,3 +44,39 @@ export async function requireChannelAccess(userId, channel) {
   }
   return requireMembership(userId, channel.community_id);
 }
+
+// ===== роли и права в сообществе =====
+// Роли упорядочены: у старшей есть всё, что у младшей. Право описывается
+// минимальной ролью, которой оно доступно, — так таблица прав читается
+// как документ и меняется в одном месте.
+export const ROLE_RANK = { member: 0, moderator: 1, owner: 2 };
+
+export const PERMISSIONS = {
+  delete_any_message: 'moderator', // удалять чужие сообщения
+  pin_messages: 'moderator',       // закреплять
+  kick_members: 'moderator',       // исключать тех, кто младше по роли
+  manage_tags: 'moderator',        // создавать теги и выставлять их участникам
+  manage_channels: 'moderator',    // создавать каналы
+  manage_roles: 'owner',           // назначать и снимать модераторов
+  manage_community: 'owner',       // переименовывать сообщество
+  view_analytics: 'owner',         // смотреть аналитику
+};
+
+export function hasPermission(role, permission) {
+  const needed = PERMISSIONS[permission];
+  return needed !== undefined && (ROLE_RANK[role] ?? -1) >= ROLE_RANK[needed];
+}
+
+// Список прав для клиента: интерфейс по нему решает, какие кнопки
+// показывать. Защита всё равно на сервере.
+export function permissionsFor(role) {
+  return Object.keys(PERMISSIONS).filter((p) => hasPermission(role, p));
+}
+
+export async function requirePermission(userId, communityId, permission) {
+  const role = await requireMembership(userId, communityId);
+  if (!hasPermission(role, permission)) {
+    throw new HttpError(403, 'not_allowed', { permission });
+  }
+  return role;
+}

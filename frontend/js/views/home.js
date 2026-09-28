@@ -8,6 +8,7 @@ import { el, mount, icon, initial, logo } from '../dom.js';
 import { playChime } from '../settings.js';
 import { navigate } from '../router.js';
 import { createChat, formatFull } from './chat.js';
+import { can, tagChip, roleBadge } from '../roles.js';
 
 let socket = null;
 let activeChats = [];
@@ -77,7 +78,9 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
   // Состояние режима сообщества.
   let community = null;
   let role = 'member';
+  let permissions = [];
   let members = [];
+  let tags = [];
   let textChannels = [];
   let voiceChannels = [];
   let unread = new Map();
@@ -88,6 +91,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
     const data = await api(`/communities/${communityId}`);
     community = data.community;
     role = data.role;
+    permissions = data.permissions ?? [];
     textChannels = data.channels.filter((c) => c.type === 'text');
     voiceChannels = data.channels.filter((c) => c.type === 'voice');
     const [membersData, unreadData, voiceData] = await Promise.all([
@@ -96,6 +100,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
       api(`/communities/${communityId}/voice`),
     ]);
     members = membersData.members;
+    tags = membersData.tags ?? [];
     for (const m of members) presence.set(m.id, m.online);
     unread = new Map(unreadData.channels.map((c) => [c.channel_id, c]));
     voice = voiceData.channels;
@@ -110,11 +115,23 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
   let threadChat = null;
   let threadRoot = null;
   let panelKind = null;
+  let tagFilter = null; // тег, по которому отфильтрован список участников
+
+  // Рядом с именем автора в чате — значок роли и до трёх тегов.
+  function decorateAuthor(userId) {
+    const member = members.find((m) => m.id === userId);
+    if (!member) return [];
+    return [
+      roleBadge(member.role, { small: true }),
+      ...member.tags.slice(0, 3).map((t) => tagChip(t, { small: true })),
+    ];
+  }
 
   const chat = createChat({
     community,
-    role,
+    permissions,
     members,
+    decorateAuthor: direct ? null : decorateAuthor,
     onRead: clearUnread,
     onOpenThread: openThread,
     onAuthorClick: direct ? null : startDirect,
@@ -239,10 +256,13 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
         { class: 'chan-item', type: 'button', onclick: () => navigate(`#/c/${community.id}/settings`) },
         [
           icon('people', 16),
-          el('span', { class: 'rail-name', text: role === 'owner' ? 'Настройки и участники' : 'Участники' }),
+          el('span', {
+            class: 'rail-name',
+            text: can(permissions, 'manage_tags') ? 'Настройки и участники' : 'Участники',
+          }),
         ],
       ),
-      role === 'owner' &&
+      can(permissions, 'view_analytics') &&
         el(
           'button',
           { class: 'chan-item', type: 'button', onclick: () => navigate(`#/c/${community.id}/analytics`) },
@@ -433,7 +453,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
   async function showPins() {
     const list = el('div', { class: 'panel-list' }, [panelEmpty('Загружаем…')]);
     openPanel('pins', 'Закреплённые', el('div', { class: 'panel-body' }, [list]));
-    const canUnpin = direct || role === 'owner';
+    const canUnpin = direct || can(permissions, 'pin_messages');
     try {
       const { messages } = await api(`/messages/pinned?channel_id=${activeChannel.id}`);
       if (panelKind !== 'pins') return;
@@ -461,22 +481,68 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
     const online = presence.get(m.id);
     return el('div', { class: 'member-row' }, [
       avatar(m.name, online),
-      el('span', { class: 'member-name', text: m.id === me ? `${m.name} (вы)` : m.name }),
-      m.role === 'owner' && el('span', { class: 'panel-tag', text: 'владелец' }),
+      el('div', { class: 'member-main' }, [
+        el('span', { class: 'member-name', text: m.id === me ? `${m.name} (вы)` : m.name }),
+        (m.role !== 'member' || m.tags.length > 0) &&
+          el('span', { class: 'member-tags' }, [
+            roleBadge(m.role, { small: true }),
+            ...m.tags.map((t) => tagChip(t, { small: true })),
+          ]),
+      ]),
       m.id !== me &&
         el('button', { class: 'btn btn-secondary btn-sm member-dm', type: 'button', text: 'Написать', onclick: () => startDirect(m.id) }),
-    ].filter(Boolean));
+    ]);
   }
 
+  // Список участников: по ролям, внутри — кто в сети. Сверху — теги для
+  // фильтра: «покажи всех дизайнеров».
   function showMembers() {
-    const online = members.filter((m) => presence.get(m.id));
-    const offline = members.filter((m) => !presence.get(m.id));
+    const visible = tagFilter
+      ? members.filter((m) => m.tags.some((t) => t.id === tagFilter))
+      : members;
+    const groups = [
+      ['owner', 'Владелец'],
+      ['moderator', 'Модераторы'],
+    ];
+    const staff = groups
+      .map(([r, label]) => [label, visible.filter((m) => m.role === r)])
+      .filter(([, list]) => list.length);
+    const rest = visible.filter((m) => m.role === 'member');
+    const online = rest.filter((m) => presence.get(m.id));
+    const offline = rest.filter((m) => !presence.get(m.id));
+
+    const filterBar = tags.length > 0 &&
+      el('div', { class: 'tag-filter' }, [
+        tagChip({ name: 'Все', color: 'violet' }, {
+          active: !tagFilter,
+          onclick: () => { tagFilter = null; showMembers(); },
+        }),
+        ...tags.map((t) =>
+          tagChip(t, {
+            active: tagFilter === t.id,
+            onclick: () => { tagFilter = tagFilter === t.id ? null : t.id; showMembers(); },
+          })),
+      ]);
+
     openPanel('members', 'Участники', el('div', { class: 'panel-body' }, [
+      filterBar,
       el('div', { class: 'panel-list' }, [
-        el('p', { class: 'panel-group', text: `В сети — ${online.length}` }),
+        ...staff.flatMap(([label, list]) => [
+          el('p', { class: 'panel-group', text: `${label} — ${list.length}` }),
+          ...list.map(memberRow),
+        ]),
+        online.length > 0 && el('p', { class: 'panel-group', text: `В сети — ${online.length}` }),
         ...online.map(memberRow),
-        el('p', { class: 'panel-group', text: `Не в сети — ${offline.length}` }),
+        offline.length > 0 && el('p', { class: 'panel-group', text: `Не в сети — ${offline.length}` }),
         ...offline.map(memberRow),
+        visible.length === 0 && panelEmpty('С этим тегом пока никого'),
+        can(permissions, 'manage_tags') &&
+          el('button', {
+            class: 'btn btn-ghost btn-sm panel-manage',
+            type: 'button',
+            text: 'Роли и теги — в настройках сообщества',
+            onclick: () => navigate(`#/c/${community.id}/settings`),
+          }),
       ]),
     ]));
   }
@@ -486,8 +552,9 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
     threadRoot = root;
     threadChat = createChat({
       community,
-      role,
+      permissions,
       members,
+      decorateAuthor: direct ? null : decorateAuthor,
       thread: root,
       onRead: clearUnread,
       onTyping: (payload) => socket?.emit('typing', payload),
@@ -587,7 +654,10 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
   async function refreshPresence() {
     try {
       if (!direct) {
-        ({ members } = await api(`/communities/${community.id}/members`));
+        const data = await api(`/communities/${community.id}/members`);
+        // Тот же массив, а не новый: на него ссылаются чаты (упоминания).
+        members.splice(0, members.length, ...data.members);
+        tags = data.tags ?? tags;
         for (const m of members) presence.set(m.id, m.online);
       }
       presence.set(me, true);
@@ -708,6 +778,39 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
       if (direct) drawConversations();
       drawSubtitle();
       if (panelKind === 'members') showMembers();
+    });
+    // Роли и теги: меняем у себя и перерисовываем подписи в чате.
+    socket.on('member_updated', ({ community_id: cid, member }) => {
+      if (cid !== community?.id) return;
+      // Самому поменяли роль — права другие, проще перерисовать экран.
+      if (member.id === me && member.role !== role) return navigate(`#/c/${cid}`);
+      const index = members.findIndex((m) => m.id === member.id);
+      if (index === -1) members.push(member);
+      else members[index] = { ...members[index], ...member };
+      chat.redrawAll();
+      threadChat?.redrawAll();
+      if (panelKind === 'members') showMembers();
+    });
+    socket.on('member_removed', ({ community_id: cid, user_id: userId }) => {
+      if (cid !== community?.id) return;
+      const index = members.findIndex((m) => m.id === userId);
+      if (index !== -1) members.splice(index, 1);
+      if (panelKind === 'members') showMembers();
+      drawSubtitle();
+    });
+    socket.on('tags_updated', async ({ community_id: cid }) => {
+      if (cid !== community?.id) return;
+      try {
+        const data = await api(`/communities/${cid}/members`);
+        members.splice(0, members.length, ...data.members);
+        tags = data.tags;
+        if (tagFilter && !tags.some((t) => t.id === tagFilter)) tagFilter = null;
+        chat.redrawAll();
+        threadChat?.redrawAll();
+        if (panelKind === 'members') showMembers();
+      } catch {
+        /* подтянется при следующем открытии */
+      }
     });
     socket.on('voice_changed', ({ channel_id: channelId }) => {
       if (voiceChannels.some((c) => c.id === channelId)) refreshVoice();
