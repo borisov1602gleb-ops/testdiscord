@@ -59,13 +59,15 @@ function hasToken(text, token) {
 
 // Параметры:
 //  community — сообщество (null для личной переписки);
-//  role      — роль в сообществе: владельцу можно удалять чужое и закреплять;
+//  permissions — права в сообществе: удалять чужое, закреплять;
 //  members   — кого можно упомянуть;
 //  thread    — корневое сообщение, если это чат треда;
+//  decorateAuthor — что показать рядом с именем автора (роль, теги);
 //  onRead, onOpenThread, onAuthorClick, onTyping — связи с экраном.
 export function createChat({
   community = null,
-  role = 'member',
+  permissions = [],
+  decorateAuthor,
   members = [],
   thread = null,
   onRead,
@@ -74,7 +76,8 @@ export function createChat({
   onTyping,
 }) {
   const me = store.user?.id;
-  const isOwner = role === 'owner';
+  // В личке модерации нет: чужое сообщение не удалить никому.
+  const canDeleteAny = () => channel?.type !== 'direct' && permissions.includes('delete_any_message');
   const isThread = Boolean(thread);
 
   let channel = null;
@@ -97,7 +100,7 @@ export function createChat({
   const typers = new Map(); // user_id → { name, until }
   const items = new Map(); // id → { message, node, options }
 
-  const canPin = () => channel?.type === 'direct' || isOwner;
+  const canPin = () => channel?.type === 'direct' || permissions.includes('pin_messages');
 
   // ===== лента =====
 
@@ -285,7 +288,7 @@ export function createChat({
       bar.append(tool(message.pinned ? 'Открепить' : 'Закрепить', 'pin', () => togglePin(message)));
     }
     if (own) bar.append(tool('Изменить', 'pencil', () => startEdit(message)));
-    if (own || isOwner) {
+    if (own || canDeleteAny()) {
       // Удаление в два нажатия: первое спрашивает, второе удаляет.
       const del = tool('Удалить', 'trash', () => {
         if (!del.classList.contains('is-armed')) {
@@ -324,6 +327,7 @@ export function createChat({
     const body = el('div', { class: 'msg-body' }, [
       el('div', { class: 'msg-head' }, [
         author,
+        ...(decorateAuthor?.(message.user_id) ?? []),
         el('span', { class: 'msg-time', text: formatTime(message.created_at), title: formatFull(message.created_at) }),
         message.edited_at && !message.deleted &&
           el('span', { class: 'msg-edited', text: 'изменено', title: formatFull(message.edited_at) }),
@@ -1086,9 +1090,16 @@ export function createChat({
   });
   node.addEventListener('drop', onDrop);
 
+  // Роль или теги кого-то поменялись — перерисовываем подписи у всех
+  // показанных сообщений.
+  function redrawAll() {
+    for (const id of items.keys()) redraw(id, {});
+  }
+
   return {
     node,
     head,
+    redrawAll,
     title,
     subtitle,
     open,

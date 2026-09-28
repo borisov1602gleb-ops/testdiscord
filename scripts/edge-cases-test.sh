@@ -303,6 +303,77 @@ check "файл в личку по channel_id" 201 \
 check "личка не видна в каналах сообщества" 0 \
   "$(curl -sf "$API/communities/$CID" -H "authorization: Bearer $OWNER" | jq '[.channels[]|select(.type=="direct")]|length')"
 
+echo '--- роли ---'
+MOD="$(login "edge-mod-$S@example.com")"
+MOD_ID="$(curl -sf "$API/users/me" -H "authorization: Bearer $MOD" | jq -r .user.id)"
+curl -sf -X POST "$API/invites/$FRESH/join" -H 'content-type: application/json' \
+  -H "authorization: Bearer $MOD" -d '{}' > /dev/null
+OWNER_ID="$(curl -sf "$API/users/me" -H "authorization: Bearer $OWNER" | jq -r .user.id)"
+check "участник не назначает модераторов" 403 \
+  "$(status PATCH "$API/communities/$CID/members/$MOD_ID" '{"role":"moderator"}' "$CHATTER")"
+check "выдуманная роль отклоняется" 400 \
+  "$(status PATCH "$API/communities/$CID/members/$MOD_ID" '{"role":"admin"}' "$OWNER")"
+check "владелец назначает модератора" 200 \
+  "$(status PATCH "$API/communities/$CID/members/$MOD_ID" '{"role":"moderator"}' "$OWNER")"
+check "владельца разжаловать нельзя" 404 \
+  "$(status PATCH "$API/communities/$CID/members/$OWNER_ID" '{"role":"member"}' "$OWNER")"
+check "модератор видит свои права" true \
+  "$(curl -sf "$API/communities/$CID" -H "authorization: Bearer $MOD" \
+     | jq '(.permissions|index("delete_any_message")) != null and (.permissions|index("manage_roles")) == null')"
+check "модератор не назначает модераторов" 403 \
+  "$(status PATCH "$API/communities/$CID/members/$CHATTER_ID" '{"role":"moderator"}' "$MOD")"
+MEMBER_MSG="$(send "$CHATTER" "{\"channel_id\":\"$TEXT\",\"content\":\"спам\"}")"
+check "модератор удаляет чужое сообщение" 204 "$(status DELETE "$API/messages/$MEMBER_MSG" '' "$MOD")"
+check "модератор закрепляет" 200 "$(status PUT "$API/messages/$ROOT/pin" '{"pinned":false}' "$MOD")"
+check "модератор создаёт канал" 201 \
+  "$(status POST "$API/communities/$CID/channels" '{"name":"модерация","type":"text"}' "$MOD")"
+check "модератор не переименовывает сообщество" 403 \
+  "$(status PATCH "$API/communities/$CID" '{"name":"Моё"}' "$MOD")"
+check "модератор не смотрит аналитику" 403 "$(status GET "$API/communities/$CID/analytics" '' "$MOD")"
+check "модератор не исключает владельца" 403 "$(status DELETE "$API/communities/$CID/members/$OWNER_ID" '' "$MOD")"
+check "участник по-прежнему не удаляет чужое" 403 \
+  "$(status DELETE "$API/messages/$ROOT" '' "$CHATTER")"
+
+echo '--- теги ---'
+check "участник не создаёт теги" 403 \
+  "$(status POST "$API/communities/$CID/tags" '{"name":"Дизайнер","color":"violet"}' "$CHATTER")"
+check "модератор создаёт тег" 201 \
+  "$(status POST "$API/communities/$CID/tags" '{"name":"Дизайнер","color":"violet"}' "$MOD")"
+TAG1="$(jq -r .tag.id "$TMP/out.json")"
+check "тег с тем же именем (другой регистр) — конфликт" 409 \
+  "$(status POST "$API/communities/$CID/tags" '{"name":"дизайнер","color":"blue"}' "$OWNER")"
+check "выдуманный цвет отклоняется" 400 \
+  "$(status POST "$API/communities/$CID/tags" '{"name":"Красный","color":"#ff0000"}' "$OWNER")"
+check "слишком длинное имя тега" 400 \
+  "$(status POST "$API/communities/$CID/tags" "{\"name\":\"$(printf 'x%.0s' {1..30})\",\"color\":\"red\"}" "$OWNER")"
+TAG2="$(curl -sf -X POST "$API/communities/$CID/tags" -H 'content-type: application/json' \
+  -H "authorization: Bearer $OWNER" -d '{"name":"9 класс","color":"teal"}' | jq -r .tag.id)"
+check "теги выставляются участнику" 200 \
+  "$(status PUT "$API/communities/$CID/members/$CHATTER_ID/tags" "{\"tag_ids\":[\"$TAG1\",\"$TAG2\"]}" "$MOD")"
+check "теги видны в составе" 2 \
+  "$(curl -sf "$API/communities/$CID/members" -H "authorization: Bearer $CHATTER" \
+     | jq --arg id "$CHATTER_ID" '.members[]|select(.id==$id)|.tags|length')"
+check "участник сам себе теги не ставит" 403 \
+  "$(status PUT "$API/communities/$CID/members/$CHATTER_ID/tags" '{"tag_ids":[]}' "$CHATTER")"
+OTHER_COMMUNITY="$(curl -sf -X POST "$API/communities" -H 'content-type: application/json' \
+  -H "authorization: Bearer $OUTSIDER" -d '{"name":"Чужое"}' | jq -r .community.id)"
+FOREIGN_TAG="$(curl -sf -X POST "$API/communities/$OTHER_COMMUNITY/tags" -H 'content-type: application/json' \
+  -H "authorization: Bearer $OUTSIDER" -d '{"name":"Чужой","color":"red"}' | jq -r .tag.id)"
+check "тег чужого сообщества не выставить" 400 \
+  "$(status PUT "$API/communities/$CID/members/$CHATTER_ID/tags" "{\"tag_ids\":[\"$FOREIGN_TAG\"]}" "$OWNER")"
+check "не больше пяти тегов на человека" too_many_member_tags \
+  "$(status PUT "$API/communities/$CID/members/$CHATTER_ID/tags" \
+     "{\"tag_ids\":[\"$(cat /proc/sys/kernel/random/uuid)\",\"$(cat /proc/sys/kernel/random/uuid)\",\"$(cat /proc/sys/kernel/random/uuid)\",\"$(cat /proc/sys/kernel/random/uuid)\",\"$(cat /proc/sys/kernel/random/uuid)\",\"$(cat /proc/sys/kernel/random/uuid)\"]}" "$OWNER" > /dev/null; jq -r .error "$TMP/out.json")"
+check "переименование тега" 200 \
+  "$(status PATCH "$API/communities/$CID/tags/$TAG1" '{"name":"Дизайнер интерфейсов"}' "$OWNER")"
+check "удаление тега снимает его с участников" 1 \
+  "$(status DELETE "$API/communities/$CID/tags/$TAG1" '' "$OWNER" > /dev/null; \
+     curl -sf "$API/communities/$CID/members" -H "authorization: Bearer $OWNER" \
+     | jq --arg id "$CHATTER_ID" '.members[]|select(.id==$id)|.tags|length')"
+check "модератор исключает участника" 200 "$(status DELETE "$API/communities/$CID/members/$CHATTER_ID" '' "$MOD")"
+check "с исключённого теги сняты" 0 \
+  "$(curl -sf "$API/communities/$CID/tags" -H "authorization: Bearer $OWNER" | jq '[.tags[].member_count]|add')"
+
 echo '--- вход по коду ---'
 BRUTE="edge-brute-$S@example.com"
 REAL="$(curl -sf -X POST "$API/auth/send-code" -H 'content-type: application/json' \

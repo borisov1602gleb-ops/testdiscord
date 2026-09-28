@@ -1,11 +1,34 @@
-// Экран сообщества: кто в нём состоит, какие есть каналы и настройки для
-// владельца. Участник видит состав и каналы, владелец дополнительно может
-// переименовать сообщество и добавить канал — права проверяет сервер,
-// интерфейс лишь не показывает лишнего.
+// Экран сообщества: состав, роли, теги, каналы и настройки. Что видно и
+// что можно менять, зависит от прав (permissions), которые присылает
+// сервер: участник видит состав и каналы, модератор дополнительно
+// создаёт каналы, ведёт теги и исключает участников, владелец —
+// назначает модераторов и переименовывает сообщество. Права проверяет
+// сервер, интерфейс лишь не показывает лишнего.
 import { api } from '../api.js';
 import { el, mount, icon, initial } from '../dom.js';
 import { navigate } from '../router.js';
 import { showInviteModal } from './home.js';
+import {
+  can, tagChip, TAG_COLORS, ROLE_LABELS, MAX_TAGS_PER_MEMBER,
+} from '../roles.js';
+
+const ROLE_RANK = { member: 0, moderator: 1, owner: 2 };
+
+// Что умеет каждая роль — для людей, а не для кода. Держим рядом с
+// экраном, где роли назначают: так понятно, что именно даёшь человеку.
+const ROLE_ABILITIES = [
+  ['Писать, отвечать, ставить реакции, прикреплять файлы', true, true, true],
+  ['Править и удалять свои сообщения', true, true, true],
+  ['Приглашать людей по ссылке', true, true, true],
+  ['Удалять чужие сообщения', false, true, true],
+  ['Закреплять сообщения', false, true, true],
+  ['Создавать каналы', false, true, true],
+  ['Создавать теги и выставлять их участникам', false, true, true],
+  ['Исключать участников (кроме модераторов и владельца)', false, true, true],
+  ['Назначать и снимать модераторов', false, false, true],
+  ['Переименовывать сообщество', false, false, true],
+  ['Смотреть аналитику', false, false, true],
+];
 
 // Опасное действие подтверждается вторым нажатием на ту же кнопку:
 // отдельное окно ради одного вопроса — лишнее, а случайный клик
@@ -36,8 +59,6 @@ function confirmingButton({ label, confirmLabel, className, onConfirm }) {
   return button;
 }
 
-const ROLE_LABELS = { owner: 'Владелец', member: 'Участник' };
-
 function formatDate(iso) {
   return new Date(iso).toLocaleDateString('ru-RU', {
     day: 'numeric',
@@ -46,18 +67,49 @@ function formatDate(iso) {
   });
 }
 
+// Выбор цвета тега — ряд кружков. Возвращает узел и функцию «какой выбран».
+function colorPicker(initialColor = 'violet') {
+  let selected = initialColor;
+  const row = el('div', { class: 'color-row', role: 'radiogroup', 'aria-label': 'Цвет тега' });
+  function draw() {
+    row.replaceChildren(
+      ...TAG_COLORS.map((c) =>
+        el('button', {
+          class: `color-dot tag-${c.id}${c.id === selected ? ' is-active' : ''}`,
+          type: 'button',
+          role: 'radio',
+          'aria-checked': String(c.id === selected),
+          title: c.label,
+          'aria-label': c.label,
+          onclick: () => {
+            selected = c.id;
+            draw();
+          },
+        }),
+      ),
+    );
+  }
+  draw();
+  return { node: row, value: () => selected };
+}
+
 export async function renderCommunity(communityId) {
   mount(el('div', { class: 'empty' }, [el('p', { class: 'empty-quiet', text: 'Загружаем…' })]));
 
   let community;
   let channels;
   let role;
+  let permissions;
   let members;
+  let tags;
   try {
-    [{ community, channels, role }, { members }] = await Promise.all([
+    const [info, membersData] = await Promise.all([
       api(`/communities/${communityId}`),
       api(`/communities/${communityId}/members`),
     ]);
+    ({ community, channels, role } = info);
+    permissions = info.permissions ?? [];
+    ({ members, tags } = membersData);
   } catch (err) {
     return mount(
       el('div', { class: 'empty' }, [
@@ -74,6 +126,17 @@ export async function renderCommunity(communityId) {
   }
 
   const isOwner = role === 'owner';
+  const canManageTags = can(permissions, 'manage_tags');
+  const canManageRoles = can(permissions, 'manage_roles');
+  const canKick = can(permissions, 'kick_members');
+  const canManageChannels = can(permissions, 'manage_channels');
+  const canRename = can(permissions, 'manage_community');
+
+  async function reloadMembers() {
+    ({ members, tags } = await api(`/communities/${communityId}/members`));
+    drawTags();
+    drawMembers();
+  }
 
   // ===== название сообщества =====
   const nameInput = el('input', {
@@ -168,9 +231,135 @@ export async function renderCommunity(communityId) {
     }
   }
 
+  // ===== теги =====
+  const tagsKicker = el('p', { class: 'settings-kicker' });
+  const tagsList = el('div', { class: 'settings-section' });
+  const tagNote = el('p', { class: 'saved-note' });
+  let editingTagId = null;
+
+  function drawTags() {
+    tagsKicker.textContent = `Теги · ${tags.length}`;
+    if (tags.length === 0) {
+      tagsList.replaceChildren(
+        el('p', {
+          class: 'row-note',
+          text: canManageTags
+            ? 'Тегов пока нет. Тег — подпись участника: «Дизайнер», «9 класс», «Капитан». На права не влияет.'
+            : 'Тегов пока нет.',
+        }),
+      );
+      return;
+    }
+    tagsList.replaceChildren(
+      ...tags.map((tag) => {
+        if (tag.id === editingTagId) return tagEditRow(tag);
+        return el('div', { class: 'settings-row tag-row' }, [
+          tagChip(tag),
+          el('p', { class: 'row-note', text: `${tag.member_count} ${peopleWord(tag.member_count)}` }),
+          canManageTags &&
+            el('div', { class: 'row-actions' }, [
+              el('button', {
+                class: 'btn btn-ghost btn-sm',
+                type: 'button',
+                text: 'Изменить',
+                onclick: () => {
+                  editingTagId = tag.id;
+                  drawTags();
+                },
+              }),
+              confirmingButton({
+                label: 'Удалить',
+                confirmLabel: 'Снять со всех и удалить?',
+                className: 'btn btn-ghost btn-sm',
+                onConfirm: async (button) => {
+                  try {
+                    await api(`/communities/${communityId}/tags/${tag.id}`, { method: 'DELETE' });
+                    await reloadMembers();
+                  } catch (err) {
+                    button.disabled = false;
+                    button.textContent = err.message;
+                  }
+                },
+              }),
+            ]),
+        ]);
+      }),
+    );
+  }
+
+  function peopleWord(n) {
+    const mod10 = n % 10;
+    const mod100 = n % 100;
+    if (mod10 === 1 && mod100 !== 11) return 'участник';
+    if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'участника';
+    return 'участников';
+  }
+
+  function tagEditRow(tag) {
+    const input = el('input', { class: 'input', type: 'text', maxlength: '24', value: tag.name });
+    const picker = colorPicker(tag.color);
+    const error = el('p', { class: 'field-error' });
+    async function save() {
+      try {
+        await api(`/communities/${communityId}/tags/${tag.id}`, {
+          method: 'PATCH',
+          body: { name: input.value.trim(), color: picker.value() },
+        });
+        editingTagId = null;
+        await reloadMembers();
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    }
+    return el('form', { class: 'settings-row tag-edit', onsubmit: (e) => (e.preventDefault(), save()) }, [
+      el('div', { class: 'tag-edit-fields' }, [input, picker.node, error]),
+      el('div', { class: 'row-actions' }, [
+        el('button', {
+          class: 'btn btn-ghost btn-sm',
+          type: 'button',
+          text: 'Отмена',
+          onclick: () => {
+            editingTagId = null;
+            drawTags();
+          },
+        }),
+        el('button', { class: 'btn btn-primary btn-sm', type: 'submit', text: 'Сохранить' }),
+      ]),
+    ]);
+  }
+
+  const newTagName = el('input', {
+    class: 'input',
+    id: 'new-tag-name',
+    type: 'text',
+    maxlength: '24',
+    placeholder: 'например, Дизайнер',
+  });
+  const newTagColor = colorPicker('violet');
+
+  async function addTag() {
+    const name = newTagName.value.trim();
+    if (!name) return;
+    tagNote.className = 'saved-note';
+    tagNote.textContent = 'Создаём…';
+    try {
+      const { tag } = await api(`/communities/${communityId}/tags`, {
+        method: 'POST',
+        body: { name, color: newTagColor.value() },
+      });
+      newTagName.value = '';
+      tagNote.textContent = `Тег «${tag.name}» создан — выставить его можно в списке участников ниже`;
+      await reloadMembers();
+    } catch (err) {
+      tagNote.className = 'field-error';
+      tagNote.textContent = err.message;
+    }
+  }
+
   // ===== участники =====
   const membersSection = el('section', { class: 'settings-section' });
   const membersKicker = el('p', { class: 'settings-kicker' });
+  let tagEditorFor = null; // у кого сейчас открыт выбор тегов
 
   async function removeMember(member, button) {
     try {
@@ -183,24 +372,123 @@ export async function renderCommunity(communityId) {
     }
   }
 
-  function drawMembers() {
-    membersKicker.textContent = `Участники · ${members.length}`;
-    membersSection.replaceChildren(
-      ...members.map((member) =>
-        el('div', { class: 'settings-row' }, [
-          el('div', { class: 'user-avatar', text: initial(member.name) }),
-          el('div', {}, [
-            el('p', { class: 'row-title', text: member.name }),
-            el('p', { class: 'row-note', text: `В сообществе с ${formatDate(member.joined_at)}` }),
-          ]),
-          el('span', {
-            class: member.role === 'owner' ? 'role-badge is-owner' : 'role-badge',
-            text: ROLE_LABELS[member.role] ?? member.role,
-          }),
-          // Исключить может только владелец и только не себя: сообщество
-          // не должно остаться без хозяина.
-          isOwner &&
-            member.role !== 'owner' &&
+  async function changeRole(member, select) {
+    select.disabled = true;
+    try {
+      const { member: updated } = await api(`/communities/${communityId}/members/${member.id}`, {
+        method: 'PATCH',
+        body: { role: select.value },
+      });
+      members = members.map((m) => (m.id === updated.id ? updated : m));
+      drawMembers();
+    } catch (err) {
+      select.disabled = false;
+      select.value = member.role;
+      alert(err.message);
+    }
+  }
+
+  // Выбор тегов участника: нажатие включает и выключает тег, «Сохранить»
+  // отправляет набор целиком.
+  function tagEditor(member) {
+    const chosen = new Set(member.tags.map((t) => t.id));
+    const chips = el('div', { class: 'tag-picker' });
+    const error = el('p', { class: 'field-error' });
+    function draw() {
+      chips.replaceChildren(
+        ...tags.map((tag) =>
+          tagChip(tag, {
+            active: chosen.has(tag.id),
+            title: chosen.has(tag.id) ? 'Снять тег' : 'Выставить тег',
+            onclick: () => {
+              if (chosen.has(tag.id)) chosen.delete(tag.id);
+              else if (chosen.size >= MAX_TAGS_PER_MEMBER) {
+                error.textContent = `Не больше ${MAX_TAGS_PER_MEMBER} тегов на человека`;
+                return;
+              } else chosen.add(tag.id);
+              error.textContent = '';
+              draw();
+            },
+          })),
+      );
+    }
+    draw();
+    async function save() {
+      try {
+        const { member: updated } = await api(`/communities/${communityId}/members/${member.id}/tags`, {
+          method: 'PUT',
+          body: { tag_ids: [...chosen] },
+        });
+        members = members.map((m) => (m.id === updated.id ? updated : m));
+        tagEditorFor = null;
+        ({ tags } = await api(`/communities/${communityId}/tags`));
+        drawTags();
+        drawMembers();
+      } catch (err) {
+        error.textContent = err.message;
+      }
+    }
+    return el('div', { class: 'tag-editor' }, [
+      tags.length
+        ? chips
+        : el('p', { class: 'row-note', text: 'Сначала создайте теги в разделе выше' }),
+      error,
+      el('div', { class: 'row-actions' }, [
+        el('button', {
+          class: 'btn btn-ghost btn-sm',
+          type: 'button',
+          text: 'Отмена',
+          onclick: () => {
+            tagEditorFor = null;
+            drawMembers();
+          },
+        }),
+        tags.length > 0 && el('button', { class: 'btn btn-primary btn-sm', type: 'button', text: 'Сохранить', onclick: save }),
+      ]),
+    ]);
+  }
+
+  function memberRow(member) {
+    const outranks = ROLE_RANK[role] > ROLE_RANK[member.role];
+    const roleControl = canManageRoles && member.role !== 'owner'
+      ? el('select', {
+        class: 'select select-sm',
+        'aria-label': `Роль: ${member.name}`,
+        onchange: (e) => changeRole(member, e.target),
+      }, [
+        el('option', { value: 'member', text: ROLE_LABELS.member }),
+        el('option', { value: 'moderator', text: ROLE_LABELS.moderator }),
+      ])
+      : el('span', {
+        class: `role-badge${member.role !== 'member' ? ` is-${member.role}` : ''}`,
+        text: ROLE_LABELS[member.role] ?? member.role,
+      });
+    if (roleControl.tagName === 'SELECT') roleControl.value = member.role;
+
+    return el('div', { class: 'member-card' }, [
+      el('div', { class: 'settings-row' }, [
+        el('div', { class: 'user-avatar', text: initial(member.name) }),
+        el('div', { class: 'member-info' }, [
+          el('p', { class: 'row-title', text: member.name }),
+          el('p', { class: 'row-note', text: `В сообществе с ${formatDate(member.joined_at)}` }),
+          member.tags.length > 0 &&
+            el('div', { class: 'member-tags' }, member.tags.map((t) => tagChip(t, { small: true }))),
+        ]),
+        el('div', { class: 'row-actions' }, [
+          roleControl,
+          canManageTags &&
+            el('button', {
+              class: 'btn btn-ghost btn-sm',
+              type: 'button',
+              text: 'Теги',
+              onclick: () => {
+                tagEditorFor = tagEditorFor === member.id ? null : member.id;
+                drawMembers();
+              },
+            }),
+          // Исключить можно только того, кто младше по роли: модератор —
+          // участника, владелец — участника и модератора.
+          canKick && outranks &&
             confirmingButton({
               label: 'Исключить',
               confirmLabel: 'Точно исключить?',
@@ -208,9 +496,17 @@ export async function renderCommunity(communityId) {
               onConfirm: (button) => removeMember(member, button),
             }),
         ]),
-      ),
-    );
+      ]),
+      tagEditorFor === member.id && tagEditor(member),
+    ]);
   }
+
+  function drawMembers() {
+    membersKicker.textContent = `Участники · ${members.length}`;
+    membersSection.replaceChildren(...members.map(memberRow));
+  }
+
+  drawTags();
   drawMembers();
 
   // ===== уход из сообщества =====
@@ -228,6 +524,23 @@ export async function renderCommunity(communityId) {
   }
 
   const title = el('h1', { class: 'settings-title', text: community.name });
+  const manages = canManageTags || canRename;
+
+  const rolesTable = el('table', { class: 'roles-table' }, [
+    el('thead', {}, [
+      el('tr', {}, [
+        el('th', { text: 'Что можно' }),
+        el('th', { text: 'Участник' }),
+        el('th', { text: 'Модератор' }),
+        el('th', { text: 'Владелец' }),
+      ]),
+    ]),
+    el('tbody', {}, ROLE_ABILITIES.map(([label, ...allowed]) =>
+      el('tr', {}, [
+        el('td', { text: label }),
+        ...allowed.map((yes) => el('td', { class: yes ? 'is-yes' : 'is-no', text: yes ? '✓' : '—' })),
+      ]))),
+  ]);
 
   mount(
     el('div', { class: 'settings' }, [
@@ -242,9 +555,9 @@ export async function renderCommunity(communityId) {
         el('button', {
           class: 'set-nav is-active',
           type: 'button',
-          text: isOwner ? 'Настройки сообщества' : 'О сообществе',
+          text: manages ? 'Настройки сообщества' : 'О сообществе',
         }),
-        isOwner &&
+        can(permissions, 'view_analytics') &&
           el('button', {
             class: 'set-nav',
             type: 'button',
@@ -256,6 +569,7 @@ export async function renderCommunity(communityId) {
       el('div', { class: 'settings-pane' }, [
         el('header', { class: 'settings-head' }, [
           title,
+          el('span', { class: `role-badge${role !== 'member' ? ` is-${role}` : ''}`, text: `Вы: ${ROLE_LABELS[role]}` }),
           el('button', {
             class: 'btn btn-secondary btn-sm',
             type: 'button',
@@ -265,7 +579,7 @@ export async function renderCommunity(communityId) {
         ]),
 
         el('div', { class: 'settings-body' }, [
-          isOwner &&
+          canRename &&
             el('section', { class: 'settings-section' }, [
               el('p', { class: 'settings-kicker', text: 'Название' }),
               el('div', { class: 'field' }, [
@@ -290,7 +604,7 @@ export async function renderCommunity(communityId) {
           channelsKicker,
           channelList,
 
-          isOwner &&
+          canManageChannels &&
             el('section', { class: 'settings-section' }, [
               el('div', { class: 'field' }, [
                 el('label', {
@@ -315,8 +629,36 @@ export async function renderCommunity(communityId) {
               channelNote,
             ]),
 
+          tagsKicker,
+          tagsList,
+
+          canManageTags &&
+            el('form', { class: 'settings-section', onsubmit: (e) => (e.preventDefault(), addTag()) }, [
+              el('div', { class: 'field' }, [
+                el('label', { class: 'field-label', for: 'new-tag-name', text: 'Новый тег' }),
+                newTagName,
+              ]),
+              el('div', { class: 'field' }, [
+                el('span', { class: 'field-label', text: 'Цвет' }),
+                newTagColor.node,
+              ]),
+              el('div', { class: 'btn-row' }, [
+                el('button', { class: 'btn btn-secondary', type: 'submit', text: 'Создать тег' }),
+              ]),
+              tagNote,
+            ]),
+
           membersKicker,
           membersSection,
+
+          el('section', { class: 'settings-section' }, [
+            el('p', { class: 'settings-kicker', text: 'Роли — кто что может' }),
+            rolesTable,
+            el('p', {
+              class: 'row-note',
+              text: 'Теги на права не влияют — это подписи, чтобы было понятно, кто есть кто.',
+            }),
+          ]),
 
           // Владельцу выход закрыт: пока нет передачи прав, сообщество
           // осталось бы без хозяина.
@@ -341,13 +683,6 @@ export async function renderCommunity(communityId) {
               ]),
               leaveNote,
             ]),
-
-          el('p', {
-            class: 'row-note',
-            text: isOwner
-              ? 'Настройки видны только вам: участники видят состав сообщества и список каналов, но менять их не могут.'
-              : 'Менять название и создавать каналы может только владелец сообщества.',
-          }),
         ]),
       ]),
     ]),
