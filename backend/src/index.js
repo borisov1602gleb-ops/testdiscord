@@ -19,13 +19,16 @@ import { analyticsRouter } from './routes/analytics.js';
 import { invitesRouter } from './routes/invites.js';
 import { callsRouter } from './routes/calls.js';
 import { messagesRouter } from './routes/messages.js';
+import { channelsRouter } from './routes/channels.js';
+import { attachmentsRouter } from './routes/attachments.js';
 
 export const app = express();
 // На этапе MVP клиент и API живут на одном адресе, поэтому cors() открыт
 // целиком. В проде список источников нужно сузить до своего домена.
 app.use(cors());
-// Явный лимит тела запроса: сообщения ограничены 2000 символами, картинок
-// и файлов в MVP нет, поэтому больше 100 КБ присылать нечего.
+// Явный лимит тела JSON: сообщения ограничены 2000 символами, поэтому
+// больше 100 КБ присылать нечего. Файлы идут отдельным маршрутом
+// /attachments со своим лимитом и в JSON не попадают.
 app.use(express.json({ limit: '100kb' }));
 
 app.get('/health', async (_req, res) => {
@@ -53,6 +56,8 @@ app.use('/communities', communitiesRouter);
 app.use('/invites', invitesRouter);
 app.use('/calls', callsRouter);
 app.use('/messages', messagesRouter);
+app.use('/channels', channelsRouter);
+app.use('/attachments', attachmentsRouter);
 
 app.use((_req, res) => res.status(404).json({ error: 'not_found' }));
 app.use(errorHandler);

@@ -70,6 +70,59 @@ const ICONS = {
       ['path', { d: 'M11.4 5.6a3.4 3.4 0 010 4.8', stroke: 'currentColor', 'stroke-width': 1.2, 'stroke-linecap': 'round' }],
     ],
   },
+  // Мелкие иконки чата: ответить, реакция, правка, удаление, скрепка,
+  // файл и галочки прочтения. Контурные, в сетке 16×16.
+  reply: {
+    box: 16,
+    shapes: [
+      ['path', { d: 'M6.2 3.8L2.6 7.4 6.2 11M3 7.4h6.6a3.8 3.8 0 013.8 3.8v1', stroke: 'currentColor', 'stroke-width': 1.4, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }],
+    ],
+  },
+  smile: {
+    box: 16,
+    shapes: [
+      ['circle', { cx: 8, cy: 8, r: 6.1, stroke: 'currentColor', 'stroke-width': 1.3 }],
+      ['path', { d: 'M5.4 9.6a3 3 0 005.2 0', stroke: 'currentColor', 'stroke-width': 1.3, 'stroke-linecap': 'round' }],
+      ['circle', { cx: 6, cy: 6.6, r: 0.85, fill: 'currentColor' }],
+      ['circle', { cx: 10, cy: 6.6, r: 0.85, fill: 'currentColor' }],
+    ],
+  },
+  pencil: {
+    box: 16,
+    shapes: [
+      ['path', { d: 'M10.6 2.9l2.5 2.5-7.4 7.4-3.1.6.6-3.1z', stroke: 'currentColor', 'stroke-width': 1.3, 'stroke-linejoin': 'round' }],
+    ],
+  },
+  trash: {
+    box: 16,
+    shapes: [
+      ['path', { d: 'M2.8 4.4h10.4M6.4 4.4V2.8h3.2v1.6M4.3 4.4l.6 8.8h6.2l.6-8.8', stroke: 'currentColor', 'stroke-width': 1.3, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }],
+    ],
+  },
+  clip: {
+    box: 16,
+    shapes: [
+      ['path', { d: 'M13.2 7.4l-5.3 5.3a3.2 3.2 0 01-4.5-4.5l5.6-5.6a2.1 2.1 0 013 3l-5.5 5.5a1 1 0 01-1.5-1.5l5-5', stroke: 'currentColor', 'stroke-width': 1.3, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }],
+    ],
+  },
+  file: {
+    box: 16,
+    shapes: [
+      ['path', { d: 'M4 1.8h5.2L12.4 5v9.2H4zM9 1.8V5.2h3.4', stroke: 'currentColor', 'stroke-width': 1.3, 'stroke-linejoin': 'round' }],
+    ],
+  },
+  check: {
+    box: 16,
+    shapes: [
+      ['path', { d: 'M3 8.6l3 3 7-7.2', stroke: 'currentColor', 'stroke-width': 1.5, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }],
+    ],
+  },
+  checks: {
+    box: 16,
+    shapes: [
+      ['path', { d: 'M1 8.6l3 3 7-7.2M7.6 11.2l.4.4 7-7.2', stroke: 'currentColor', 'stroke-width': 1.5, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }],
+    ],
+  },
   alert: {
     box: 18,
     shapes: [

@@ -2,15 +2,27 @@
 // создаются сообщества и приглашения и происходит вход в голосовой канал.
 import { api } from '../api.js';
 import { store } from '../store.js';
-import { el, mount, formatTime, icon, initial, logo } from '../dom.js';
+import { el, mount, icon, initial, logo } from '../dom.js';
 import { playChime } from '../settings.js';
 import { navigate } from '../router.js';
+import { createChat } from './chat.js';
 
 let socket = null;
+let activeChat = null;
 
 export function disconnectRealtime() {
   socket?.disconnect();
   socket = null;
+  activeChat = null;
+}
+
+// Вернулся во вкладку — значит, увидел то, что пришло, пока его не было.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) activeChat?.markRead();
+});
+
+function countLabel(n) {
+  return n > 99 ? '99+' : String(n);
 }
 
 export async function renderHome(communityId) {
@@ -25,75 +37,222 @@ export async function renderHome(communityId) {
   // role приходит из того же запроса: по нему решаем, показывать ли владельцу
   // вкладку аналитики. Сервер всё равно проверяет права сам.
   const { community, channels, role } = await api(`/communities/${communityId}`);
+  const [{ members }, unreadData, voiceData] = await Promise.all([
+    api(`/communities/${communityId}/members`),
+    api(`/communities/${communityId}/unread`),
+    api(`/communities/${communityId}/voice`),
+  ]);
+  const me = store.user?.id;
   const textChannels = channels.filter((c) => c.type === 'text');
   const voiceChannels = channels.filter((c) => c.type === 'voice');
+  const unread = new Map(unreadData.channels.map((c) => [c.channel_id, c]));
+  let voice = voiceData.channels;
+  let activeChannel = null;
 
-  let activeChannel = textChannels[0] ?? null;
-  const feedNode = el('div', { class: 'chat-feed' });
-  const seenMessageIds = new Set();
+  const chat = createChat({
+    community,
+    role,
+    members,
+    // Канал на экране — в нём непрочитанных нет.
+    onRead: (channelId) => {
+      const entry = unread.get(channelId);
+      if (entry && (entry.unread || entry.mentions)) {
+        entry.unread = 0;
+        entry.mentions = 0;
+        drawChannels();
+        drawRail();
+      }
+    },
+  });
+  activeChat = chat;
+  chat.head.append(
+    el('button', {
+      class: 'btn btn-primary btn-sm',
+      type: 'button',
+      text: 'Пригласить',
+      onclick: () => showInviteModal(community.id),
+    }),
+  );
+  chat.title.textContent = community.name;
 
-  function appendMessage(message) {
-    if (seenMessageIds.has(message.id)) return;
-    seenMessageIds.add(message.id);
-    feedNode.querySelector('.empty-quiet')?.remove();
+  const railList = el('div', { class: 'pane-list' });
+  const channelList = el('div', { class: 'pane-list' });
 
-    const author = message.author_name ?? '';
-    feedNode.append(
-      el('article', { class: 'msg' }, [
-        el('div', { class: 'msg-avatar', text: initial(author) }),
-        el('div', {}, [
-          el('div', { class: 'msg-head' }, [
-            el('span', { class: 'msg-author', text: author }),
-            el('span', { class: 'msg-time', text: formatTime(message.created_at) }),
-          ]),
-          el('p', { class: 'msg-text', text: message.content }),
-        ]),
-      ]),
+  function drawRail() {
+    const ownTotal = [...unread.values()].reduce((sum, c) => sum + c.unread, 0);
+    const ownMentions = [...unread.values()].reduce((sum, c) => sum + c.mentions, 0);
+    railList.replaceChildren(
+      ...communities.map((item) => {
+        const current = item.id === community.id;
+        const total = current ? ownTotal : item.unread;
+        const mentions = current ? ownMentions : item.mentions;
+        return el(
+          'button',
+          {
+            class: `rail-item${current ? ' is-active' : ''}${total ? ' has-unread' : ''}`,
+            type: 'button',
+            onclick: () => navigate(`#/c/${item.id}`),
+          },
+          [
+            el('span', { class: 'rail-badge', text: initial(item.name) }),
+            el('span', { class: 'rail-name', text: item.name }),
+            total > 0 &&
+              el('span', {
+                class: `count-pill${mentions ? ' is-mention' : ''}`,
+                text: mentions ? `@ ${countLabel(total)}` : countLabel(total),
+              }),
+          ],
+        );
+      }),
     );
-    feedNode.scrollTop = feedNode.scrollHeight;
+  }
+
+  function voicePeople(channelId) {
+    const people = voice[channelId] ?? [];
+    if (people.length === 0) return null;
+    return el(
+      'div',
+      { class: 'voice-people' },
+      people.map((p) =>
+        el('div', { class: 'voice-person' }, [
+          el('span', { class: 'voice-avatar', text: initial(p.name) }),
+          el('span', { class: 'rail-name', text: p.user_id === me ? `${p.name} (вы)` : p.name }),
+        ]),
+      ),
+    );
+  }
+
+  function drawChannels() {
+    // replaceChildren, в отличие от el(), пустые значения не пропускает —
+    // отфильтровываем их сами, иначе на экране появится «null».
+    channelList.replaceChildren(...[
+      el('div', { class: 'chan-group', text: 'Текстовые' }),
+      ...textChannels.map((channel) => {
+        const counts = unread.get(channel.id) ?? { unread: 0, mentions: 0 };
+        const isActive = channel.id === activeChannel?.id;
+        return el(
+          'button',
+          {
+            class: `chan-item${isActive ? ' is-active' : ''}${counts.unread ? ' has-unread' : ''}`,
+            type: 'button',
+            onclick: () => openTextChannel(channel),
+          },
+          [
+            el('span', { class: 'chan-hash', text: '#' }),
+            el('span', { class: 'rail-name', text: channel.name }),
+            counts.mentions > 0 && el('span', { class: 'count-pill is-mention', text: '@', title: 'Вас упомянули' }),
+            counts.unread > 0 &&
+              el('span', { class: 'count-pill', text: countLabel(counts.unread), title: 'Непрочитанные' }),
+          ],
+        );
+      }),
+      el('div', { class: 'chan-group', text: 'Голосовые' }),
+      ...voiceChannels.flatMap((channel) => {
+        const people = voice[channel.id] ?? [];
+        return [
+          el(
+            'button',
+            { class: 'chan-item', type: 'button', onclick: () => joinVoice(channel) },
+            [
+              icon('speaker'),
+              el('span', { class: 'rail-name', text: channel.name }),
+              people.length > 0 &&
+                el('span', { class: 'count-pill is-live', text: String(people.length), title: 'Сейчас в канале' }),
+            ],
+          ),
+          voicePeople(channel.id),
+        ];
+      }),
+      // Состав сообщества виден всем участникам, аналитика — только
+      // владельцу. Это подсказка интерфейса, а не защита: права
+      // всё равно проверяет сервер.
+      el('div', { class: 'chan-group', text: 'Сообщество' }),
+      el(
+        'button',
+        {
+          class: 'chan-item',
+          type: 'button',
+          onclick: () => navigate(`#/c/${community.id}/settings`),
+        },
+        [
+          icon('people', 16),
+          el('span', {
+            class: 'rail-name',
+            text: role === 'owner' ? 'Настройки и участники' : 'Участники',
+          }),
+        ],
+      ),
+      role === 'owner' &&
+        el(
+          'button',
+          {
+            class: 'chan-item',
+            type: 'button',
+            onclick: () => navigate(`#/c/${community.id}/analytics`),
+          },
+          [icon('chart', 16), el('span', { class: 'rail-name', text: 'Аналитика' })],
+        ),
+    ].filter(Boolean));
   }
 
   async function openTextChannel(channel) {
     activeChannel = channel;
-    seenMessageIds.clear();
-    feedNode.replaceChildren();
-    draw();
-
-    const { messages } = await api(`/messages?channel_id=${channel.id}`);
-    if (messages.length === 0) {
-      feedNode.append(el('p', { class: 'empty-quiet', text: 'Пока ни одного сообщения' }));
-    }
-    messages.forEach(appendMessage);
-    subscribe(channel.id);
+    drawChannels();
+    const lastReadAt = unread.get(channel.id)?.last_read_at;
+    await chat.open(channel, { lastReadAt });
   }
 
-  function subscribe(channelId) {
-    disconnectRealtime();
-    socket = io({ auth: { token: store.token } });
-    socket.on('connect', () => socket.emit('join_channel', channelId));
-    socket.on('message', (message) => {
-      if (message.channel_id !== channelId) return;
-      appendMessage(message);
-      // Своё же сообщение возвращается тем же каналом — на него не звеним.
-      if (message.user_id !== store.user?.id && document.hidden) playChime('message');
-    });
-  }
-
-  async function send(input) {
-    const content = input.value.trim();
-    if (!content) return;
-    input.value = '';
+  async function refreshVoice() {
     try {
-      const { message } = await api('/messages', {
-        method: 'POST',
-        body: { channel_id: activeChannel.id, content },
-      });
-      // Обычно сообщение приходит обратно по WebSocket; если соединения нет,
-      // показываем его сразу (повтор отсекается по id).
-      appendMessage(message);
-    } catch (err) {
-      feedNode.append(el('p', { class: 'field-error', text: err.message }));
+      ({ channels: voice } = await api(`/communities/${community.id}/voice`));
+      drawChannels();
+    } catch {
+      /* список подтянется при следующем событии */
     }
+  }
+
+  function connect() {
+    socket = io({ auth: { token: store.token } });
+    // Одна подписка на всё сообщество: новые сообщения во всех каналах
+    // (для счётчиков), правки, реакции, прочтения и голосовые каналы.
+    socket.on('connect', () => socket.emit('join_community', community.id));
+    socket.on('message', (message) => {
+      const mentionsMe = message.mentions?.some((m) => m.user_id === me);
+      if (message.channel_id === activeChannel?.id) {
+        chat.onMessage(message);
+      } else if (message.user_id !== me) {
+        const entry = unread.get(message.channel_id) ?? { unread: 0, mentions: 0, channel_id: message.channel_id };
+        entry.unread += 1;
+        if (mentionsMe) entry.mentions += 1;
+        unread.set(message.channel_id, entry);
+        drawChannels();
+        drawRail();
+      }
+      // Своё сообщение возвращается тем же каналом — на него не звеним.
+      if (message.user_id !== me && (document.hidden || mentionsMe)) playChime('message');
+    });
+    socket.on('message_updated', (message) => chat.onUpdated(message));
+    socket.on('message_deleted', (payload) => chat.onDeleted(payload));
+    socket.on('reactions_updated', (payload) => chat.onReactions(payload));
+    socket.on('read_updated', (payload) => {
+      if (payload.user_id === me) {
+        // Прочитал в другой вкладке — счётчик гаснет и здесь.
+        const entry = unread.get(payload.channel_id);
+        if (entry) {
+          entry.unread = 0;
+          entry.mentions = 0;
+          entry.last_read_at = payload.last_read_at;
+          drawChannels();
+          drawRail();
+        }
+      } else {
+        chat.onReadUpdate(payload);
+      }
+    });
+    socket.on('voice_changed', refreshVoice);
+    socket.on('removed_from_community', ({ community_id: removedId }) => {
+      if (removedId === community.id) navigate('#/');
+    });
   }
 
   async function joinVoice(channel) {
@@ -110,144 +269,35 @@ export async function renderHome(communityId) {
     navigate(`#/call/${call.id}`);
   }
 
-  function draw() {
-    const composerInput = el('input', {
-      class: 'input',
-      type: 'text',
-      // Тот же предел, что и на сервере: лучше не дать набрать лишнее,
-      // чем показать ошибку после отправки.
-      maxlength: '2000',
-      placeholder: activeChannel ? `Написать в #${activeChannel.name}` : 'Нет текстового канала',
-      disabled: activeChannel ? null : 'true',
-    });
-
-    mount(
-      el('div', { class: 'app' }, [
-        el('nav', { class: 'rail' }, [
-          el('p', { class: 'pane-head' }, [logo(32), el('span', { text: 'Сообщества' })]),
-          el(
-            'div',
-            { class: 'pane-list' },
-            communities.map((item) =>
-              el(
-                'button',
-                {
-                  class: `rail-item${item.id === community.id ? ' is-active' : ''}`,
-                  type: 'button',
-                  onclick: () => navigate(`#/c/${item.id}`),
-                },
-                [
-                  el('span', { class: 'rail-badge', text: initial(item.name) }),
-                  el('span', { class: 'rail-name', text: item.name }),
-                ],
-              ),
-            ),
-          ),
-          el('div', { class: 'pane-foot' }, [
-            el('button', {
-              class: 'btn btn-ghost',
-              type: 'button',
-              text: '+ Сообщество',
-              onclick: showCommunityModal,
-            }),
-          ]),
-          // Профиль внизу левой колонки — как в макете: он относится ко
-          // всему приложению, а не к конкретному сообществу.
-          userZone(),
+  drawRail();
+  drawChannels();
+  mount(
+    el('div', { class: 'app' }, [
+      el('nav', { class: 'rail' }, [
+        el('p', { class: 'pane-head' }, [logo(32), el('span', { text: 'Сообщества' })]),
+        railList,
+        el('div', { class: 'pane-foot' }, [
+          el('button', {
+            class: 'btn btn-ghost',
+            type: 'button',
+            text: '+ Сообщество',
+            onclick: showCommunityModal,
+          }),
         ]),
-
-        el('nav', { class: 'channels' }, [
-          el('div', { class: 'pane-title', text: community.name }),
-          el('div', { class: 'pane-list' }, [
-            el('div', { class: 'chan-group', text: 'Текстовые' }),
-            ...textChannels.map((channel) =>
-              el(
-                'button',
-                {
-                  class: `chan-item${channel.id === activeChannel?.id ? ' is-active' : ''}`,
-                  type: 'button',
-                  onclick: () => openTextChannel(channel),
-                },
-                [
-                  el('span', { class: 'chan-hash', text: '#' }),
-                  el('span', { class: 'rail-name', text: channel.name }),
-                ],
-              ),
-            ),
-            el('div', { class: 'chan-group', text: 'Голосовые' }),
-            ...voiceChannels.map((channel) =>
-              el(
-                'button',
-                { class: 'chan-item', type: 'button', onclick: () => joinVoice(channel) },
-                [icon('speaker'), el('span', { class: 'rail-name', text: channel.name })],
-              ),
-            ),
-            // Состав сообщества виден всем участникам, аналитика — только
-            // владельцу. Это подсказка интерфейса, а не защита: права
-            // всё равно проверяет сервер.
-            el('div', { class: 'chan-group', text: 'Сообщество' }),
-            el(
-              'button',
-              {
-                class: 'chan-item',
-                type: 'button',
-                onclick: () => navigate(`#/c/${community.id}/settings`),
-              },
-              [
-                icon('people', 16),
-                el('span', {
-                  class: 'rail-name',
-                  text: role === 'owner' ? 'Настройки и участники' : 'Участники',
-                }),
-              ],
-            ),
-            role === 'owner' &&
-              el(
-                'button',
-                {
-                  class: 'chan-item',
-                  type: 'button',
-                  onclick: () => navigate(`#/c/${community.id}/analytics`),
-                },
-                [icon('chart', 16), el('span', { class: 'rail-name', text: 'Аналитика' })],
-              ),
-          ]),
-        ]),
-
-        el('main', { class: 'chat' }, [
-          el('header', { class: 'chat-head' }, [
-            el('span', {
-              class: 'chat-title',
-              text: activeChannel ? `# ${activeChannel.name}` : community.name,
-            }),
-            el('button', {
-              class: 'btn btn-primary btn-sm',
-              type: 'button',
-              text: 'Пригласить',
-              onclick: () => showInviteModal(community.id),
-            }),
-          ]),
-          feedNode,
-          el(
-            'form',
-            { class: 'composer', onsubmit: (e) => (e.preventDefault(), send(composerInput)) },
-            [
-              composerInput,
-              el('button', {
-                class: 'btn btn-primary',
-                type: 'submit',
-                text: 'Отправить',
-                disabled: activeChannel ? null : 'true',
-              }),
-            ],
-          ),
-        ]),
+        // Профиль внизу левой колонки — как в макете: он относится ко
+        // всему приложению, а не к конкретному сообществу.
+        userZone(),
       ]),
-    );
-  }
+      el('nav', { class: 'channels' }, [
+        el('div', { class: 'pane-title', text: community.name }),
+        channelList,
+      ]),
+      chat.node,
+    ]),
+  );
+  connect();
 
-  if (activeChannel) await openTextChannel(activeChannel);
-  else draw();
+  if (textChannels[0]) await openTextChannel(textChannels[0]);
 }
 
 // Плашка профиля внизу колонки каналов: имя, статус и меню с настройками
