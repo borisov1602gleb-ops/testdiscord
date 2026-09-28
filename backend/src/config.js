@@ -21,6 +21,12 @@ export const config = {
     // работать сама.
     linkTtlSec: Number(process.env.ATTACHMENT_LINK_TTL_SEC || 2 * 60 * 60),
   },
+  calls: {
+    // Сколько секунд тишины от вкладки звонка — и человек выведен из
+    // звонка; как часто это проверяется. 0 выключает проверку.
+    staleSec: Number(process.env.CALL_STALE_SEC ?? 30),
+    sweepSec: Number(process.env.CALL_SWEEP_SEC ?? 10),
+  },
   etl: {
     // Как часто пересобираются аналитические слои. 0 выключает
     // автозапуск — тогда остаётся ручной `npm run etl` и кнопка

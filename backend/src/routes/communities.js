@@ -7,12 +7,15 @@ import { requireAuth } from '../middleware/auth.js';
 import { logEvent, EVENT_TYPES } from '../lib/events.js';
 import {
   requireMembership, requirePermission, hasPermission, permissionsFor, ROLE_RANK,
+  channelVisibleSql, getChannel,
 } from '../lib/access.js';
 import { parseUuid } from '../lib/validate.js';
 import { PUBLIC_NAME_SQL, publicNameSql } from '../lib/users.js';
 import { avatarUrl } from '../lib/signed-urls.js';
 import { rawBody, contentTypeOf, saveUpload, IMAGE_TYPES } from './attachments.js';
-import { evictFromCommunity, isOnline, emitToCommunity } from '../lib/realtime.js';
+import {
+  evictFromCommunity, isOnline, emitToCommunity, emitToUser, resetChannelRooms,
+} from '../lib/realtime.js';
 
 export const communitiesRouter = Router();
 
@@ -73,6 +76,12 @@ async function listMembers(communityId, userId = null) {
     avatar_url: avatarUrl(avatarId),
     online: isOnline(m.id),
   }));
+}
+
+// У человека поменялись роль или теги — поменялся и список закрытых
+// каналов, которые он видит: его вкладки перечитают список каналов.
+function emitToUserChannelsChanged(userId, communityId) {
+  emitToUser(userId, 'channels_updated', { community_id: communityId });
 }
 
 // Изменился участник (роль, теги) — открытые вкладки перерисуют подписи.
@@ -156,6 +165,7 @@ async function unreadByChannel(userId, communityId = null) {
             count(mm.message_id)::int AS mentions
      FROM community_members cm
      JOIN channels ch ON ch.community_id = cm.community_id AND ch.type = 'text'
+       AND ${channelVisibleSql('ch', 'cm')}
      LEFT JOIN channel_reads cr ON cr.channel_id = ch.id AND cr.user_id = cm.user_id
      LEFT JOIN messages m
        ON m.channel_id = ch.id
@@ -228,11 +238,13 @@ communitiesRouter.get(
               CASE WHEN u.id IS NULL THEN 'Гость' ELSE ${PUBLIC_NAME_SQL} END AS name
        FROM calls c
        JOIN channels ch ON ch.id = c.channel_id
+       JOIN community_members cm ON cm.community_id = ch.community_id AND cm.user_id = $2
        JOIN call_participants cp ON cp.call_id = c.id AND cp.left_at IS NULL
        LEFT JOIN users u ON u.id = cp.user_id
        WHERE ch.community_id = $1 AND c.ended_at IS NULL
+         AND ${channelVisibleSql('ch', 'cm')}
        ORDER BY cp.joined_at`,
-      [communityId],
+      [communityId, req.user.id],
     );
     const channels = {};
     for (const row of rows) {
@@ -254,9 +266,17 @@ communitiesRouter.get(
     if (rows.length === 0) throw new HttpError(404, 'community_not_found');
 
     const role = await requireMembership(req.user.id, req.params.id);
+    // Закрытые каналы, которые человеку не видны, в список не попадают
+    // вовсе — даже названием.
     const { rows: channels } = await query(
-      'SELECT * FROM channels WHERE community_id = $1 ORDER BY type, created_at',
-      [req.params.id],
+      `SELECT ch.id, ch.community_id, ch.name, ch.type, ch.created_at, ch.is_private, ch.read_only,
+              COALESCE((SELECT array_agg(tag_id) FROM channel_allowed_tags WHERE channel_id = ch.id), '{}')
+                AS allowed_tag_ids
+       FROM channels ch
+       JOIN community_members cm ON cm.community_id = ch.community_id AND cm.user_id = $2
+       WHERE ch.community_id = $1 AND ${channelVisibleSql('ch', 'cm')}
+       ORDER BY ch.type, ch.created_at`,
+      [req.params.id, req.user.id],
     );
 
     const { avatar_id: avatarId, ...community } = rows[0];
@@ -302,6 +322,14 @@ communitiesRouter.patch(
       [communityId, targetId, role],
     );
     if (rows.length === 0) throw new HttpError(404, 'member_not_found');
+
+    // Разжалованный модератор теряет доступ к закрытым каналам без тега.
+    const { rows: privateRows } = await query(
+      'SELECT id FROM channels WHERE community_id = $1 AND is_private',
+      [communityId],
+    );
+    resetChannelRooms(privateRows.map((r) => r.id), targetId);
+    emitToUserChannelsChanged(targetId, communityId);
 
     await announceMember(communityId, targetId);
     const [member] = await listMembers(communityId, targetId);
@@ -430,6 +458,14 @@ communitiesRouter.put(
       }
     });
 
+    // Доступ к закрытым каналам мог поменяться вместе с тегами.
+    const { rows: privateRows } = await query(
+      'SELECT id FROM channels WHERE community_id = $1 AND is_private',
+      [communityId],
+    );
+    resetChannelRooms(privateRows.map((r) => r.id), targetId);
+    emitToUserChannelsChanged(targetId, communityId);
+
     await announceMember(communityId, targetId);
     const [member] = await listMembers(communityId, targetId);
     res.json({ member });
@@ -471,6 +507,7 @@ communitiesRouter.post(
       throw new HttpError(400, 'name_too_long', { max_length: MAX_CHANNEL_NAME_LENGTH });
     }
     if (type !== 'text' && type !== 'voice') throw new HttpError(400, 'invalid_channel_type');
+    const access = await parseChannelAccess(req.body, communityId, type);
 
     const { rows: countRows } = await query(
       'SELECT count(*)::int AS total FROM channels WHERE community_id = $1',
@@ -480,11 +517,93 @@ communitiesRouter.post(
       throw new HttpError(409, 'too_many_channels', { max: MAX_CHANNELS });
     }
 
-    const { rows } = await query(
-      'INSERT INTO channels (community_id, name, type) VALUES ($1, $2, $3) RETURNING *',
-      [communityId, name, type],
+    const channel = await withTransaction(async (client) => {
+      const { rows } = await client.query(
+        `INSERT INTO channels (community_id, name, type, is_private, read_only)
+         VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+        [communityId, name, type, access.isPrivate ?? false, access.readOnly ?? false],
+      );
+      await saveAllowedTags(client, rows[0].id, access.allowedTagIds ?? []);
+      return rows[0];
+    });
+    emitToCommunity(communityId, 'channels_updated', { community_id: communityId });
+    res.status(201).json({ channel: { ...channel, allowed_tag_ids: access.allowedTagIds ?? [] } });
+  }),
+);
+
+// Закрытость и «только для чтения». Разрешённые теги — только из этого
+// сообщества; «только для чтения» бывает лишь у текстового канала.
+async function parseChannelAccess(body, communityId, type) {
+  const result = {};
+  if (body?.is_private !== undefined) result.isPrivate = body.is_private === true;
+  if (body?.read_only !== undefined) {
+    result.readOnly = body.read_only === true;
+    if (result.readOnly && type !== 'text') throw new HttpError(400, 'read_only_text_only');
+  }
+  if (body?.allowed_tag_ids !== undefined) {
+    if (!Array.isArray(body.allowed_tag_ids)) throw new HttpError(400, 'invalid_tags');
+    const ids = [...new Set(body.allowed_tag_ids.map((id) => parseUuid(id, 'allowed_tag_ids')))];
+    if (ids.length) {
+      const { rows } = await query(
+        'SELECT count(*)::int AS total FROM community_tags WHERE community_id = $1 AND id = ANY($2::uuid[])',
+        [communityId, ids],
+      );
+      if (rows[0].total !== ids.length) throw new HttpError(400, 'invalid_tags');
+    }
+    result.allowedTagIds = ids;
+  }
+  return result;
+}
+
+async function saveAllowedTags(client, channelId, tagIds) {
+  await client.query('DELETE FROM channel_allowed_tags WHERE channel_id = $1', [channelId]);
+  if (tagIds.length) {
+    await client.query(
+      'INSERT INTO channel_allowed_tags (channel_id, tag_id) SELECT $1, unnest($2::uuid[])',
+      [channelId, tagIds],
     );
-    res.status(201).json({ channel: rows[0] });
+  }
+}
+
+// Изменить канал: название, закрытость, разрешённые теги, «только для
+// чтения». После изменения все выходят из комнаты канала и заходят
+// заново уже с проверкой новых правил.
+communitiesRouter.patch(
+  '/:id/channels/:channelId',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const communityId = parseUuid(req.params.id, 'community_id');
+    const channelId = parseUuid(req.params.channelId, 'channel_id');
+    await requirePermission(req.user.id, communityId, 'manage_channels');
+    const current = await getChannel(channelId);
+    if (current.community_id !== communityId) throw new HttpError(404, 'channel_not_found');
+
+    let name = null;
+    if (req.body?.name !== undefined) {
+      name = String(req.body.name).trim();
+      if (!name) throw new HttpError(400, 'name_required');
+      if (name.length > MAX_CHANNEL_NAME_LENGTH) {
+        throw new HttpError(400, 'name_too_long', { max_length: MAX_CHANNEL_NAME_LENGTH });
+      }
+    }
+    const access = await parseChannelAccess(req.body, communityId, current.type);
+
+    await withTransaction(async (client) => {
+      await client.query(
+        `UPDATE channels
+         SET name = COALESCE($2, name),
+             is_private = COALESCE($3, is_private),
+             read_only = COALESCE($4, read_only)
+         WHERE id = $1`,
+        [channelId, name, access.isPrivate ?? null, access.readOnly ?? null],
+      );
+      if (access.allowedTagIds) await saveAllowedTags(client, channelId, access.allowedTagIds);
+    });
+
+    resetChannelRooms([channelId]);
+    emitToCommunity(communityId, 'channels_updated', { community_id: communityId });
+    const channel = await getChannel(channelId);
+    res.json({ channel: { ...channel, allowed_tag_ids: channel.allowed_tag_ids ?? [] } });
   }),
 );
 
@@ -695,5 +814,39 @@ communitiesRouter.delete(
     await requirePermission(req.user.id, communityId, 'manage_community');
     await query('UPDATE communities SET avatar_id = NULL WHERE id = $1', [communityId]);
     res.json({ avatar_url: null });
+  }),
+);
+
+// ===== передача прав владельца =====
+// Владелец отдаёт сообщество другому участнику и сам становится
+// модератором: так он не теряет возможность помогать, а сообщество не
+// остаётся без хозяина. После этого бывший владелец может и уйти.
+communitiesRouter.post(
+  '/:id/transfer',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const communityId = parseUuid(req.params.id, 'community_id');
+    const targetId = parseUuid(req.body?.user_id, 'user_id');
+    await requireOwner(req.user.id, communityId);
+    if (targetId === req.user.id) throw new HttpError(400, 'already_owner');
+
+    await withTransaction(async (client) => {
+      const { rows } = await client.query(
+        `UPDATE community_members SET role = 'owner'
+         WHERE community_id = $1 AND user_id = $2
+         RETURNING user_id`,
+        [communityId, targetId],
+      );
+      if (rows.length === 0) throw new HttpError(404, 'member_not_found');
+      await client.query(
+        `UPDATE community_members SET role = 'moderator' WHERE community_id = $1 AND user_id = $2`,
+        [communityId, req.user.id],
+      );
+      await client.query('UPDATE communities SET owner_id = $2 WHERE id = $1', [communityId, targetId]);
+    });
+
+    await announceMember(communityId, targetId);
+    await announceMember(communityId, req.user.id);
+    res.json({ transferred: true });
   }),
 );

@@ -10,6 +10,7 @@ import { navigate } from '../router.js';
 import { createChat, formatFull } from './chat.js';
 import { can, tagChip, roleBadge } from '../roles.js';
 import { avatarNode } from '../avatar.js';
+import { showNotification, plainText } from '../notify.js';
 
 let socket = null;
 let activeChats = [];
@@ -51,20 +52,32 @@ function highlight(text, query) {
   return out;
 }
 
-export function renderHome(communityId) {
-  return renderWorkspace({ communityId });
+export function renderHome(communityId, channelId = null) {
+  return renderWorkspace({ communityId, channelId });
 }
 
 export function renderDirect(conversationId) {
   return renderWorkspace({ direct: true, conversationId });
 }
 
-async function renderWorkspace({ communityId = null, direct = false, conversationId = null }) {
+async function renderWorkspace({ communityId = null, direct = false, conversationId = null, channelId = null }) {
   mount(
     el('div', { class: 'empty' }, [el('p', { class: 'empty-quiet', text: 'Загружаем…' })]),
   );
 
-  const [{ communities }, directData] = await Promise.all([api('/communities'), api('/direct')]);
+  const [{ communities }, directData, notifyData] = await Promise.all([
+    api('/communities'),
+    api('/direct'),
+    api('/users/me/notifications').catch(() => ({ settings: [] })),
+  ]);
+  // Уровни уведомлений: канал → сообщество → по умолчанию. По умолчанию
+  // в сообществе — только упоминания, в личке — все сообщения.
+  const notifyLevels = new Map(notifyData.settings.map((n) => [`${n.target_type}:${n.target_id}`, n.level]));
+  const channelLevel = (id) => notifyLevels.get(`channel:${id}`);
+  const communityLevel = (id) => notifyLevels.get(`community:${id}`) ?? 'mentions';
+  function levelFor({ channelId: chId, communityId: cId, isDirect }) {
+    return channelLevel(chId) ?? (isDirect ? 'all' : communityLevel(cId));
+  }
   let conversations = directData.conversations;
   if (!direct) {
     if (!communityId && communities.length > 0) return navigate(`#/c/${communities[0].id}`);
@@ -219,18 +232,22 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
       ...textChannels.map((channel) => {
         const counts = unread.get(channel.id) ?? { unread: 0, mentions: 0 };
         const isActive = channel.id === activeChannel?.id;
+        // Приглушённый канал: счётчик прячем, упоминание всё равно видно.
+        const muted = levelFor({ channelId: channel.id, communityId: community.id }) === 'none';
         return el(
           'button',
           {
-            class: `chan-item${isActive ? ' is-active' : ''}${counts.unread ? ' has-unread' : ''}`,
+            class: `chan-item${isActive ? ' is-active' : ''}${counts.unread && !muted ? ' has-unread' : ''}${muted ? ' is-muted' : ''}`,
             type: 'button',
             onclick: () => openTextChannel(channel),
           },
           [
             el('span', { class: 'chan-hash', text: '#' }),
             el('span', { class: 'rail-name', text: channel.name }),
+            channel.is_private && el('span', { class: 'chan-flag', title: 'Закрытый канал' }, [icon('lock', 13)]),
+            channel.read_only && el('span', { class: 'chan-flag', title: 'Только для чтения' }, [icon('megaphone', 13)]),
             counts.mentions > 0 && el('span', { class: 'count-pill is-mention', text: '@', title: 'Вас упомянули' }),
-            counts.unread > 0 &&
+            counts.unread > 0 && !muted &&
               el('span', { class: 'count-pill', text: countLabel(counts.unread), title: 'Непрочитанные' }),
           ],
         );
@@ -245,6 +262,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
             [
               icon('speaker'),
               el('span', { class: 'rail-name', text: channel.name }),
+              channel.is_private && el('span', { class: 'chan-flag', title: 'Закрытый канал' }, [icon('lock', 13)]),
               people.length > 0 &&
                 el('span', { class: 'count-pill is-live', text: String(people.length), title: 'Сейчас в канале' }),
             ],
@@ -352,6 +370,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
     headActions.replaceChildren(...[
       hasChannel && headButton('search', direct ? 'Поиск в переписке' : 'Поиск по сообществу', 'search', showSearch),
       hasChannel && headButton('pins', 'Закреплённые', 'pin', showPins),
+      hasChannel && notifyButton(),
       !direct && headButton('members', 'Участники', 'people', showMembers),
       !direct && can(permissions, 'handle_reports') && reportsButton(),
       !direct &&
@@ -526,6 +545,75 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
       results,
     ]));
     field.focus();
+  }
+
+  // Колокольчик: уровень уведомлений открытого канала.
+  const NOTIFY_OPTIONS = [
+    ['default', 'По умолчанию'],
+    ['all', 'Все сообщения'],
+    ['mentions', 'Только упоминания'],
+    ['none', 'Ничего — приглушить'],
+  ];
+  let notifyMenu = null;
+
+  function notifyButton() {
+    const own = channelLevel(activeChannel.id);
+    const effective = levelFor({ channelId: activeChannel.id, communityId: community?.id, isDirect: direct });
+    const button = el('button', {
+      class: `head-btn${notifyMenu ? ' is-active' : ''}${effective === 'none' ? ' is-muted' : ''}`,
+      type: 'button',
+      title: effective === 'none' ? 'Уведомления выключены' : 'Уведомления канала',
+      'aria-label': 'Уведомления канала',
+      onclick: (event) => {
+        event.stopPropagation();
+        if (notifyMenu) return closeNotifyMenu();
+        const fallback = direct ? 'все сообщения' : `как в сообществе: ${
+          { all: 'все', mentions: 'упоминания', none: 'ничего' }[communityLevel(community.id)]}`;
+        notifyMenu = el('div', { class: 'notify-menu' }, [
+          el('p', { class: 'readers-title', text: 'Уведомлять о…' }),
+          ...NOTIFY_OPTIONS.map(([level, label]) =>
+            el('button', {
+              class: `notify-option${(own ?? 'default') === level ? ' is-active' : ''}`,
+              type: 'button',
+              onclick: () => setChannelLevel(level),
+            }, [
+              el('span', { text: label }),
+              level === 'default' && el('span', { class: 'notify-hint', text: fallback }),
+            ])),
+        ]);
+        button.after(notifyMenu);
+        setTimeout(() => document.addEventListener('click', onNotifyOutside), 0);
+        button.classList.add('is-active');
+      },
+    }, [icon('bell', 18)]);
+    return button;
+  }
+
+  function onNotifyOutside(event) {
+    if (notifyMenu && !notifyMenu.contains(event.target)) closeNotifyMenu();
+  }
+
+  function closeNotifyMenu() {
+    notifyMenu?.remove();
+    notifyMenu = null;
+    document.removeEventListener('click', onNotifyOutside);
+    drawHeadActions();
+  }
+
+  async function setChannelLevel(level) {
+    const channelIdToSet = activeChannel.id;
+    try {
+      await api('/users/me/notifications', {
+        method: 'PUT',
+        body: { target_type: 'channel', target_id: channelIdToSet, level },
+      });
+      if (level === 'default') notifyLevels.delete(`channel:${channelIdToSet}`);
+      else notifyLevels.set(`channel:${channelIdToSet}`, level);
+    } catch {
+      /* останется прежний уровень */
+    }
+    closeNotifyMenu();
+    drawSecond();
   }
 
   async function showPins() {
@@ -805,10 +893,30 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
       }
     }
 
-    // Своё сообщение возвращается тем же каналом — на него не звеним.
-    if (!mine && (document.hidden || mentionsMe || (message.is_direct && !isActive))) {
-      playChime('message');
-    }
+    // Звук и уведомление браузера — по уровню канала: всё, только
+    // упоминания или ничего. Своё сообщение и открытый на экране канал
+    // не звенят.
+    if (mine || (isActive && !document.hidden)) return;
+    const level = levelFor({
+      channelId: message.channel_id,
+      communityId: message.community_id,
+      isDirect: message.is_direct,
+    });
+    const wanted = level === 'all' || (level === 'mentions' && (mentionsMe || message.is_direct));
+    if (!wanted) return;
+    playChime('message');
+    const where = message.is_direct
+      ? message.author_name
+      : `${message.author_name} · #${message.channel_name}`;
+    showNotification({
+      title: mentionsMe ? `${where} — вас упомянули` : where,
+      body: plainText(message.content) || (message.poll ? `Опрос: ${message.poll.question}` : 'вложение'),
+      icon: message.author_avatar_url,
+      tag: message.channel_id,
+      onClick: () => navigate(message.is_direct
+        ? `#/dm/${message.channel_id}`
+        : `#/c/${message.community_id}/ch/${message.channel_id}`),
+    });
   }
 
   function connect() {
@@ -901,6 +1009,29 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
         /* подтянется при следующем открытии */
       }
     });
+    // Каналы поменялись: создан новый, канал стал закрытым, у меня
+    // поменялись теги или роль. Перечитываем список.
+    socket.on('channels_updated', async ({ community_id: cid }) => {
+      if (cid !== community?.id) return;
+      try {
+        const data = await api(`/communities/${cid}`);
+        textChannels = data.channels.filter((c) => c.type === 'text');
+        voiceChannels = data.channels.filter((c) => c.type === 'voice');
+        const fresh = textChannels.find((c) => c.id === activeChannel?.id);
+        if (!fresh) {
+          // Канал стал недоступен — уходим в первый доступный.
+          if (textChannels[0]) openTextChannel(textChannels[0]);
+        } else if (fresh.read_only !== activeChannel.read_only || fresh.name !== activeChannel.name) {
+          openTextChannel(fresh, { keepPanel: true });
+        } else {
+          activeChannel = fresh;
+          drawChannels();
+        }
+        refreshVoice();
+      } catch {
+        /* подтянется при следующем открытии */
+      }
+    });
     socket.on('voice_changed', ({ channel_id: channelId }) => {
       if (voiceChannels.some((c) => c.id === channelId)) refreshVoice();
     });
@@ -921,6 +1052,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
       communityName: community.name,
       communityId: community.id,
       guest: false,
+      board: joined.board,
       ...joined.livekit,
     };
     navigate(`#/call/${call.id}`);
@@ -986,7 +1118,8 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
   } else {
     chat.title.textContent = community.name;
     drawSubtitle();
-    if (textChannels[0]) await openTextChannel(textChannels[0]);
+    const requested = channelId && textChannels.find((c) => c.id === channelId);
+    if (requested || textChannels[0]) await openTextChannel(requested || textChannels[0]);
   }
 }
 

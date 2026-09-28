@@ -498,6 +498,94 @@ for bad in 'http://127.0.0.1:3000/health' 'http://localhost/' 'file:///etc/passw
 done
 check "превью без входа недоступно" 401 "$(status GET "$API/link-preview?url=https%3A%2F%2Fexample.com")"
 
+echo '--- закрытые каналы и «только для чтения» ---'
+check "участник не создаёт закрытый канал" 403 \
+  "$(status POST "$API/communities/$CID/channels" '{"name":"тайное","type":"text","is_private":true}' "$VERA")"
+check "закрытый канал для тега" 201 \
+  "$(status POST "$API/communities/$CID/channels" "{\"name\":\"класс-9\",\"type\":\"text\",\"is_private\":true,\"allowed_tag_ids\":[\"$TAG2\"]}" "$OWNER")"
+PRIV="$(jq -r .channel.id "$TMP/out.json")"
+check "без тега закрытый канал не виден даже в списке" 0 \
+  "$(curl -sf "$API/communities/$CID" -H "authorization: Bearer $VICTIM" | jq --arg id "$PRIV" '[.channels[]|select(.id==$id)]|length')"
+check "с тегом — виден" 1 \
+  "$(curl -sf "$API/communities/$CID" -H "authorization: Bearer $VERA" | jq --arg id "$PRIV" '[.channels[]|select(.id==$id)]|length')"
+check "модератор видит без тега" 1 \
+  "$(curl -sf "$API/communities/$CID" -H "authorization: Bearer $MOD" | jq --arg id "$PRIV" '[.channels[]|select(.id==$id)]|length')"
+check "без тега историю не прочитать" 403 "$(status GET "$API/messages?channel_id=$PRIV" '' "$VICTIM")"
+check "без тега не написать" 403 "$(status POST "$API/messages" "{\"channel_id\":\"$PRIV\",\"content\":\"пусти\"}" "$VICTIM")"
+check "упомянуть того, кто не видит канал, нельзя" 0 \
+  "$(status POST "$API/messages" "{\"channel_id\":\"$PRIV\",\"content\":\"секретное слово\",\"mentions\":[\"$VICTIM_ID\"]}" "$OWNER" > /dev/null; \
+     jq '.message.mentions|length' "$TMP/out.json")"
+check "поиск не находит в чужом закрытом канале" 0 \
+  "$(curl -sf "$API/messages/search?community_id=$CID&q=%D1%81%D0%B5%D0%BA%D1%80%D0%B5%D1%82%D0%BD%D0%BE%D0%B5" \
+     -H "authorization: Bearer $VICTIM" | jq '.messages|length')"
+check "поиск находит у того, кто видит" 1 \
+  "$(curl -sf "$API/messages/search?community_id=$CID&q=%D1%81%D0%B5%D0%BA%D1%80%D0%B5%D1%82%D0%BD%D0%BE%D0%B5" \
+     -H "authorization: Bearer $VERA" | jq '.messages|length')"
+check "непрочитанные чужого закрытого канала не видны" 0 \
+  "$(curl -sf "$API/communities/$CID/unread" -H "authorization: Bearer $VICTIM" | jq --arg id "$PRIV" '[.channels[]|select(.channel_id==$id)]|length')"
+check "чужой тег в доступ не добавить" 400 \
+  "$(status PATCH "$API/communities/$CID/channels/$PRIV" "{\"allowed_tag_ids\":[\"$FOREIGN_TAG\"]}" "$OWNER")"
+check "участник канал не меняет" 403 "$(status PATCH "$API/communities/$CID/channels/$PRIV" '{"is_private":false}' "$VERA")"
+check "канал объявлений" 201 \
+  "$(status POST "$API/communities/$CID/channels" '{"name":"объявления","type":"text","read_only":true}' "$OWNER")"
+ANN="$(jq -r .channel.id "$TMP/out.json")"
+check "в канал объявлений участник не пишет" 403 \
+  "$(status POST "$API/messages" "{\"channel_id\":\"$ANN\",\"content\":\"можно?\"}" "$VERA")"
+check "причина понятна" channel_read_only "$(jq -r .error "$TMP/out.json")"
+check "модератор пишет в канал объявлений" 201 \
+  "$(status POST "$API/messages" "{\"channel_id\":\"$ANN\",\"content\":\"Созвон в пятницу\"}" "$MOD")"
+check "участник читает канал объявлений" 200 "$(status GET "$API/messages?channel_id=$ANN" '' "$VERA")"
+check "«только для чтения» бывает только у текстового" 400 \
+  "$(status POST "$API/communities/$CID/channels" '{"name":"эфир","type":"voice","read_only":true}' "$OWNER")"
+check "канал можно закрыть позже" 200 "$(status PATCH "$API/communities/$CID/channels/$ANN" '{"is_private":true}' "$OWNER")"
+check "после закрытия участник теряет доступ" 403 "$(status GET "$API/messages?channel_id=$ANN" '' "$VERA")"
+check "закрытый голосовой" 201 \
+  "$(status POST "$API/communities/$CID/channels" '{"name":"штаб","type":"voice","is_private":true}' "$OWNER")"
+PRIV_VOICE="$(jq -r .channel.id "$TMP/out.json")"
+check "гость в закрытый голосовой не попадёт" 403 \
+  "$(status POST "$API/calls" "{\"channel_id\":\"$PRIV_VOICE\",\"invite_id\":\"$FRESH\",\"anonymous_id\":\"edge-priv-$S\"}")"
+check "участник без доступа — тоже" 403 "$(status POST "$API/calls" "{\"channel_id\":\"$PRIV_VOICE\"}" "$VICTIM")"
+check "приглашение не предлагает закрытый голосовой" true \
+  "$(curl -sf "$API/invites/$FRESH" | jq --arg id "$PRIV_VOICE" '.voice_channel.id != $id')"
+
+echo '--- настройки уведомлений ---'
+check "уровень для канала" 200 \
+  "$(status PUT "$API/users/me/notifications" "{\"target_type\":\"channel\",\"target_id\":\"$TEXT\",\"level\":\"none\"}" "$VERA")"
+check "уровень для сообщества" 200 \
+  "$(status PUT "$API/users/me/notifications" "{\"target_type\":\"community\",\"target_id\":\"$CID\",\"level\":\"all\"}" "$VERA")"
+check "настройки читаются" "none all" \
+  "$(curl -sf "$API/users/me/notifications" -H "authorization: Bearer $VERA" | \
+     jq -r --arg ch "$TEXT" --arg c "$CID" '[(.settings[]|select(.target_id==$ch)|.level),(.settings[]|select(.target_id==$c)|.level)]|join(" ")')"
+check "неизвестный уровень" 400 \
+  "$(status PUT "$API/users/me/notifications" "{\"target_type\":\"channel\",\"target_id\":\"$TEXT\",\"level\":\"loud\"}" "$VERA")"
+check "неизвестный тип цели" 400 \
+  "$(status PUT "$API/users/me/notifications" "{\"target_type\":\"user\",\"target_id\":\"$TEXT\",\"level\":\"none\"}" "$VERA")"
+check "чужое сообщество не настроить" 403 \
+  "$(status PUT "$API/users/me/notifications" "{\"target_type\":\"community\",\"target_id\":\"$CID\",\"level\":\"none\"}" "$OUTSIDER")"
+check "закрытый канал без доступа не настроить" 403 \
+  "$(status PUT "$API/users/me/notifications" "{\"target_type\":\"channel\",\"target_id\":\"$PRIV\",\"level\":\"none\"}" "$VICTIM")"
+check "«по умолчанию» удаляет настройку" 0 \
+  "$(status PUT "$API/users/me/notifications" "{\"target_type\":\"channel\",\"target_id\":\"$TEXT\",\"level\":\"default\"}" "$VERA" > /dev/null; \
+     curl -sf "$API/users/me/notifications" -H "authorization: Bearer $VERA" | jq --arg ch "$TEXT" '[.settings[]|select(.target_id==$ch)]|length')"
+
+echo '--- автовыход из звонка и передача прав ---'
+check "сигнал «я здесь» принимается" 200 \
+  "$(status POST "$API/calls" "{\"channel_id\":\"$VOICE\"}" "$OWNER" > /dev/null; \
+     HB_CALL="$(jq -r .call.id "$TMP/out.json")"; echo "$HB_CALL" > "$TMP/hbcall"; \
+     status POST "$API/calls/$HB_CALL/join" '{}' "$OWNER" > /dev/null; \
+     status POST "$API/calls/$HB_CALL/heartbeat" '{}' "$OWNER")"
+check "без участия сигнал не принимается" 404 "$(status POST "$API/calls/$(cat "$TMP/hbcall")/heartbeat" '{}' "$VERA")"
+check "участник права не передаёт" 403 \
+  "$(status POST "$API/communities/$CID/transfer" "{\"user_id\":\"$VERA_ID\"}" "$MOD")"
+check "передать права не-участнику нельзя" 404 \
+  "$(status POST "$API/communities/$CID/transfer" "{\"user_id\":\"$OUTSIDER_ID\"}" "$OWNER")"
+check "владелец передаёт права" 200 "$(status POST "$API/communities/$CID/transfer" "{\"user_id\":\"$MOD_ID\"}" "$OWNER")"
+check "новый владелец" owner \
+  "$(curl -sf "$API/communities/$CID" -H "authorization: Bearer $MOD" | jq -r .role)"
+check "бывший владелец стал модератором" moderator \
+  "$(curl -sf "$API/communities/$CID" -H "authorization: Bearer $OWNER" | jq -r .role)"
+check "и теперь может уйти" 200 "$(status DELETE "$API/communities/$CID/members/me" '' "$OWNER")"
+
 echo '--- вход по коду ---'
 BRUTE="edge-brute-$S@example.com"
 REAL="$(curl -sf -X POST "$API/auth/send-code" -H 'content-type: application/json' \

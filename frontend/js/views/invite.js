@@ -78,6 +78,7 @@ export async function renderInvite(inviteId) {
         communityName: preview.community.name,
         inviteId,
         guest: !store.isAuthenticated,
+        board: joined.board,
         ...joined.livekit,
       };
       navigate(`#/call/${call.id}`);
