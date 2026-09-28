@@ -28,6 +28,18 @@ const MESSAGES = {
   invalid_expires_at: 'Некорректная дата окончания',
   invalid_max_uses: 'Некорректное число использований',
   call_creation_conflict: 'Звонок уже создаётся — попробуйте ещё раз',
+  channel_is_not_text: 'Писать можно только в текстовый канал',
+  message_not_found: 'Сообщение не найдено',
+  message_deleted: 'Сообщение уже удалено',
+  not_message_author: 'Это можно сделать только со своим сообщением',
+  invalid_reply: 'Сообщение, на которое вы отвечаете, недоступно',
+  invalid_attachment: 'Файл не удалось прикрепить — загрузите его заново',
+  invalid_reaction: 'Такой реакции нет',
+  invalid_mentions: 'Не удалось разобрать упоминания',
+  too_many_mentions: 'Слишком много упоминаний в одном сообщении',
+  unsupported_file_type: 'Такой тип файла не поддерживается: подойдут картинки, PDF, текст и ZIP',
+  empty_file: 'Файл пустой',
+  file_too_large: 'Файл больше 10 МБ',
   unauthorized: 'Нужно войти заново',
 };
 
@@ -50,7 +62,26 @@ export async function api(path, { method = 'GET', body, auth = true } = {}) {
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
 
-  const data = await res.json().catch(() => ({}));
+  return readResponse(res);
+}
+
+// Файл уходит сырым телом, а не JSON: так не нужно ни кодировать его
+// в base64 (плюс треть к размеру), ни тащить библиотеку разбора форм.
+export async function uploadFile(path, file) {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${store.token}`,
+      'content-type': file.type || 'application/octet-stream',
+    },
+    body: file,
+  });
+  return readResponse(res, { tooLarge: 'file_too_large' });
+}
+
+async function readResponse(res, { tooLarge } = {}) {
+  // No-content ответы (удаление) тела не имеют — это не ошибка.
+  const data = res.status === 204 ? {} : await res.json().catch(() => ({}));
   if (!res.ok) {
     // Токен протух или подписан другим ключом — это не поломка, а повод
     // спокойно отправить человека на вход. Роутер не импортируем: он сам
@@ -59,7 +90,8 @@ export async function api(path, { method = 'GET', body, auth = true } = {}) {
       store.clearSession();
       location.hash = '#/login';
     }
-    throw new ApiError(data.error, res.status, data.details);
+    const code = res.status === 413 && tooLarge ? tooLarge : data.error;
+    throw new ApiError(code, res.status, data.details);
   }
   return data;
 }

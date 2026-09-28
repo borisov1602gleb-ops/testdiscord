@@ -3,10 +3,16 @@
 // чтобы имя не разъезжалось между чатом, звонком и списками.
 import { query } from '../db.js';
 
-export const PUBLIC_NAME_SQL = `COALESCE(
-  NULLIF(u.display_name, ''),
-  CASE WHEN u.hide_email THEN 'Участник' ELSE u.email END
+// alias — под каким именем таблица users стоит в запросе: в одном запросе
+// бывает сразу автор сообщения и автор того, на что он отвечает.
+export function publicNameSql(alias = 'u') {
+  return `COALESCE(
+  NULLIF(${alias}.display_name, ''),
+  CASE WHEN ${alias}.hide_email THEN 'Участник' ELSE ${alias}.email END
 )`;
+}
+
+export const PUBLIC_NAME_SQL = publicNameSql('u');
 
 export async function getProfile(userId) {
   const { rows } = await query(

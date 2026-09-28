@@ -8,6 +8,7 @@ import { logEvent, EVENT_TYPES } from '../lib/events.js';
 import { requireMembership } from '../lib/access.js';
 import { parseUuid } from '../lib/validate.js';
 import { PUBLIC_NAME_SQL } from '../lib/users.js';
+import { evictFromCommunity } from '../lib/realtime.js';
 
 export const communitiesRouter = Router();
 
@@ -60,6 +61,32 @@ communitiesRouter.post(
   }),
 );
 
+// Непрочитанные по каждому текстовому каналу. Отсчёт — от отметки
+// прочтения, а если человек канал ещё не открывал — от момента вступления:
+// новичку не нужно видеть «999 непрочитанных» из чужой истории.
+// Свои и удалённые сообщения не считаются.
+async function unreadByChannel(userId, communityId = null) {
+  const { rows } = await query(
+    `SELECT ch.community_id, ch.id AS channel_id,
+            COALESCE(cr.last_read_at, cm.joined_at) AS last_read_at,
+            count(m.id)::int AS unread,
+            count(mm.message_id)::int AS mentions
+     FROM community_members cm
+     JOIN channels ch ON ch.community_id = cm.community_id AND ch.type = 'text'
+     LEFT JOIN channel_reads cr ON cr.channel_id = ch.id AND cr.user_id = cm.user_id
+     LEFT JOIN messages m
+       ON m.channel_id = ch.id
+      AND m.user_id <> cm.user_id
+      AND m.deleted_at IS NULL
+      AND m.created_at > COALESCE(cr.last_read_at, cm.joined_at)
+     LEFT JOIN message_mentions mm ON mm.message_id = m.id AND mm.user_id = cm.user_id
+     WHERE cm.user_id = $1 AND ($2::uuid IS NULL OR cm.community_id = $2::uuid)
+     GROUP BY ch.community_id, ch.id, cr.last_read_at, cm.joined_at`,
+    [userId, communityId],
+  );
+  return rows;
+}
+
 communitiesRouter.get(
   '/',
   requireAuth,
@@ -72,7 +99,63 @@ communitiesRouter.get(
        ORDER BY m.joined_at`,
       [req.user.id],
     );
-    res.json({ communities: rows });
+    const totals = new Map();
+    for (const row of await unreadByChannel(req.user.id)) {
+      const total = totals.get(row.community_id) ?? { unread: 0, mentions: 0 };
+      total.unread += row.unread;
+      total.mentions += row.mentions;
+      totals.set(row.community_id, total);
+    }
+    res.json({
+      communities: rows.map((c) => ({ ...c, ...(totals.get(c.id) ?? { unread: 0, mentions: 0 }) })),
+    });
+  }),
+);
+
+communitiesRouter.get(
+  '/:id/unread',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const communityId = parseUuid(req.params.id, 'community_id');
+    await requireMembership(req.user.id, communityId);
+    const rows = await unreadByChannel(req.user.id, communityId);
+    res.json({
+      // last_read_at нужен клиенту, чтобы провести черту «Новые сообщения».
+      channels: rows.map(({ channel_id, unread, mentions, last_read_at }) => ({
+        channel_id, unread, mentions, last_read_at,
+      })),
+    });
+  }),
+);
+
+// Кто сейчас сидит в голосовых каналах — чтобы видеть это из списка
+// каналов, не заходя в звонок. Гости показываются без имени.
+communitiesRouter.get(
+  '/:id/voice',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const communityId = parseUuid(req.params.id, 'community_id');
+    await requireMembership(req.user.id, communityId);
+    const { rows } = await query(
+      `SELECT c.channel_id, cp.user_id, cp.joined_at,
+              CASE WHEN u.id IS NULL THEN 'Гость' ELSE ${PUBLIC_NAME_SQL} END AS name
+       FROM calls c
+       JOIN channels ch ON ch.id = c.channel_id
+       JOIN call_participants cp ON cp.call_id = c.id AND cp.left_at IS NULL
+       LEFT JOIN users u ON u.id = cp.user_id
+       WHERE ch.community_id = $1 AND c.ended_at IS NULL
+       ORDER BY cp.joined_at`,
+      [communityId],
+    );
+    const channels = {};
+    for (const row of rows) {
+      (channels[row.channel_id] ??= []).push({
+        user_id: row.user_id,
+        name: row.name,
+        joined_at: row.joined_at,
+      });
+    }
+    res.json({ channels });
   }),
 );
 
@@ -184,6 +267,14 @@ async function removeMember({ actorId, communityId, targetId, res }) {
     [communityId, targetId],
   );
   if (rows.length === 0) throw new HttpError(404, 'member_not_found');
+
+  // Открытые вкладки исключённого сразу перестают получать события
+  // сообщества, а не после перезагрузки.
+  const { rows: channelRows } = await query(
+    'SELECT id FROM channels WHERE community_id = $1',
+    [communityId],
+  );
+  evictFromCommunity(targetId, communityId, channelRows.map((c) => c.id));
 
   // Сообщения и участие в звонках остаются: история сообщества не должна
   // рассыпаться из-за того, что человек ушёл.

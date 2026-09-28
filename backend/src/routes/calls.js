@@ -12,6 +12,7 @@ import { parseUuid } from '../lib/validate.js';
 import { createCallToken } from '../lib/livekit.js';
 import { getProfile } from '../lib/users.js';
 import { config } from '../config.js';
+import { emitToCommunity } from '../lib/realtime.js';
 
 export const callsRouter = Router();
 
@@ -165,6 +166,8 @@ callsRouter.post(
     });
 
     await logJoin('success', call.community_id);
+    // Остальные участники сообщества перезапросят, кто сейчас в голосовом.
+    emitToCommunity(call.community_id, 'voice_changed', { channel_id: call.channel_id });
 
     res.status(201).json({
       participant: participantRows[0],
@@ -221,19 +224,24 @@ callsRouter.post(
       return rows[0];
     });
 
+    const { rows: callRows } = await query(
+      `SELECT c.channel_id, ch.community_id
+       FROM calls c JOIN channels ch ON ch.id = c.channel_id
+       WHERE c.id = $1`,
+      [callId],
+    );
+    const callInfo = callRows[0];
+    if (callInfo) {
+      emitToCommunity(callInfo.community_id, 'voice_changed', { channel_id: callInfo.channel_id });
+    }
+
     // Событие участия фиксируется только для зарегистрированных пользователей
     // (раздел 12.2): у гостя нет user_id, его вклад попадёт в аналитику
     // только если он зарегистрировался и запись была привязана к user_id.
     if (participant.user_id) {
-      const { rows: communityRows } = await query(
-        `SELECT ch.community_id
-         FROM calls c JOIN channels ch ON ch.id = c.channel_id
-         WHERE c.id = $1`,
-        [callId],
-      );
       await logEvent(EVENT_TYPES.CALL_PARTICIPATED, {
         user_id: participant.user_id,
-        community_id: communityRows[0]?.community_id ?? null,
+        community_id: callInfo?.community_id ?? null,
         call_id: callId,
         duration_sec: participant.duration_sec,
       });

@@ -156,6 +156,96 @@ check "отрицательный limit не роняет историю" 200 \
   "$(status GET "$API/messages?channel_id=$TEXT&limit=-5" '' "$OWNER")"
 check "нечитаемый id канала — 400" 400 "$(status GET "$API/messages?channel_id=abc" '' "$OWNER")"
 
+echo '--- правка, ответы, реакции, прочтение ---'
+CHATTER="$(login "edge-chatter-$S@example.com")"
+CHATTER_ID="$(curl -sf "$API/users/me" -H "authorization: Bearer $CHATTER" | jq -r .user.id)"
+curl -sf -X POST "$API/invites/$FRESH/join" -H 'content-type: application/json' \
+  -H "authorization: Bearer $CHATTER" -d '{}' > /dev/null
+OUTSIDER_ID="$(curl -sf "$API/users/me" -H "authorization: Bearer $OUTSIDER" | jq -r .user.id)"
+
+send() { # send ТОКЕН тело → id сообщения
+  curl -sf -X POST "$API/messages" -H 'content-type: application/json' \
+    -H "authorization: Bearer $1" -d "$2" | jq -r .message.id
+}
+MSG="$(send "$OWNER" "{\"channel_id\":\"$TEXT\",\"content\":\"@участник привет\",\"mentions\":[\"$CHATTER_ID\",\"$OUTSIDER_ID\"]}")"
+check "упомянуть можно только участника" 1 \
+  "$(curl -sf "$API/messages?channel_id=$TEXT" -H "authorization: Bearer $OWNER" \
+     | jq --arg id "$MSG" '[.messages[]|select(.id==$id)|.mentions[]]|length')"
+check "упоминание видно в непрочитанных" 1 \
+  "$(curl -sf "$API/communities/$CID/unread" -H "authorization: Bearer $CHATTER" \
+     | jq --arg ch "$TEXT" '.channels[]|select(.channel_id==$ch)|.mentions')"
+check "чужое сообщение не правится" 403 \
+  "$(status PATCH "$API/messages/$MSG" '{"content":"переписал"}' "$CHATTER")"
+check "своё сообщение правится" 200 \
+  "$(status PATCH "$API/messages/$MSG" '{"content":"поправил"}' "$OWNER")"
+check "правка помечается" true "$(jq '.message.edited_at != null' "$TMP/out.json")"
+check "список прочитавших — только автору" 403 "$(status GET "$API/messages/$MSG/readers" '' "$CHATTER")"
+check "пока никто не прочитал" 0 \
+  "$(curl -sf "$API/messages/$MSG/readers" -H "authorization: Bearer $OWNER" | jq '.readers|length')"
+# Ответ сам по себе значит «прочитал»: отвечающему ставится отметка.
+check "ответ на сообщение из другого канала отклоняется" 400 \
+  "$(status POST "$API/messages" "{\"channel_id\":\"$TEXT\",\"content\":\"ответ\",\"reply_to\":\"$CALL\"}" "$CHATTER")"
+check "ответ на сообщение из канала" 201 \
+  "$(status POST "$API/messages" "{\"channel_id\":\"$TEXT\",\"content\":\"ответ\",\"reply_to\":\"$MSG\"}" "$CHATTER")"
+check "реакция вне набора отклоняется" 400 "$(status PUT "$API/messages/$MSG/reactions" '{"emoji":"💩"}' "$CHATTER")"
+check "реакция ставится" 1 \
+  "$(status PUT "$API/messages/$MSG/reactions" '{"emoji":"👍"}' "$CHATTER" > /dev/null; jq '.reactions[0].count' "$TMP/out.json")"
+check "повторная реакция снимается" 0 \
+  "$(status PUT "$API/messages/$MSG/reactions" '{"emoji":"👍"}' "$CHATTER" > /dev/null; jq '.reactions|length' "$TMP/out.json")"
+check "посторонний реакцию не ставит" 403 "$(status PUT "$API/messages/$MSG/reactions" '{"emoji":"👍"}' "$OUTSIDER")"
+check "отметка прочтения" 200 "$(status POST "$API/channels/$TEXT/read" '' "$CHATTER")"
+check "автор видит, кто прочитал" "$CHATTER_ID" \
+  "$(curl -sf "$API/messages/$MSG/readers" -H "authorization: Bearer $OWNER" | jq -r '.readers[0].id')"
+check "после прочтения непрочитанных нет" 0 \
+  "$(curl -sf "$API/communities/$CID/unread" -H "authorization: Bearer $CHATTER" \
+     | jq --arg ch "$TEXT" '.channels[]|select(.channel_id==$ch)|.unread')"
+check "посторонний не отмечает прочтение" 403 "$(status POST "$API/channels/$TEXT/read" '' "$OUTSIDER")"
+check "участник не удаляет чужое" 403 "$(status DELETE "$API/messages/$MSG" '' "$CHATTER")"
+REPLY_ID="$(send "$CHATTER" "{\"channel_id\":\"$TEXT\",\"content\":\"моё\"}")"
+check "владелец удаляет чужое (модерация)" 204 "$(status DELETE "$API/messages/$REPLY_ID" '' "$OWNER")"
+check "удалённое не правится" 410 "$(status PATCH "$API/messages/$REPLY_ID" '{"content":"вернул"}' "$CHATTER")"
+check "текст удалённого не отдаётся" '""' \
+  "$(curl -sf "$API/messages?channel_id=$TEXT" -H "authorization: Bearer $OWNER" \
+     | jq --arg id "$REPLY_ID" '.messages[]|select(.id==$id)|.content')"
+
+echo '--- подгрузка истории ---'
+for i in 1 2 3 4 5; do send "$OWNER" "{\"channel_id\":\"$TEXT\",\"content\":\"страница $i\"}" > /dev/null; done
+curl -sf "$API/messages?channel_id=$TEXT&limit=3" -H "authorization: Bearer $OWNER" > "$TMP/page1.json"
+OLDEST="$(jq -r '.messages[0].id' "$TMP/page1.json")"
+check "первая страница знает, что есть ещё" true "$(jq .has_more "$TMP/page1.json")"
+curl -sf "$API/messages?channel_id=$TEXT&limit=3&before=$OLDEST" -H "authorization: Bearer $OWNER" > "$TMP/page2.json"
+check "страницы не пересекаются" 0 \
+  "$(jq -s '[.[0].messages[].id] - ([.[0].messages[].id] - [.[1].messages[].id]) | length' "$TMP/page1.json" "$TMP/page2.json")"
+check "вторая страница старше первой" true \
+  "$(jq -s '.[1].messages[-1].created_at <= .[0].messages[0].created_at' "$TMP/page1.json" "$TMP/page2.json")"
+
+echo '--- вложения ---'
+printf '\x89PNG\r\n\x1a\n' > "$TMP/pic.png"
+upload() { # upload ТОКЕН тип файл → код ответа
+  curl -s -o "$TMP/out.json" -w '%{http_code}' -X POST \
+    "$API/attachments?community_id=$CID&filename=pic.png" \
+    -H "authorization: Bearer $1" -H "content-type: $2" --data-binary @"$3"
+}
+check "HTML как вложение не принимается" 415 "$(upload "$OWNER" text/html "$TMP/pic.png")"
+check "SVG как вложение не принимается" 415 "$(upload "$OWNER" image/svg+xml "$TMP/pic.png")"
+check "посторонний не загружает" 403 "$(upload "$OUTSIDER" image/png "$TMP/pic.png")"
+head -c 11000000 /dev/zero > "$TMP/big.bin"
+check "слишком большой файл — 413" 413 "$(upload "$OWNER" image/png "$TMP/big.bin")"
+check "картинка загружается" 201 "$(upload "$OWNER" image/png "$TMP/pic.png")"
+ATT_ID="$(jq -r .attachment.id "$TMP/out.json")"
+ATT_URL="$(jq -r .attachment.url "$TMP/out.json")"
+check "по подписанной ссылке файл отдаётся" 200 "$(curl -s -o /dev/null -w '%{http_code}' "$API$ATT_URL")"
+check "браузеру запрещено угадывать тип" nosniff \
+  "$(curl -s -D - -o /dev/null "$API$ATT_URL" | tr -d '\r' | awk -F': ' 'tolower($1)=="x-content-type-options"{print $2}')"
+check "без подписи файл не отдаётся" 403 \
+  "$(curl -s -o /dev/null -w '%{http_code}' "$API/attachments/$ATT_ID?exp=9999999999&sig=fake")"
+check "чужое вложение не прикрепить" 400 \
+  "$(status POST "$API/messages" "{\"channel_id\":\"$TEXT\",\"attachment_id\":\"$ATT_ID\"}" "$CHATTER")"
+check "картинка без подписи отправляется" 201 \
+  "$(status POST "$API/messages" "{\"channel_id\":\"$TEXT\",\"attachment_id\":\"$ATT_ID\"}" "$OWNER")"
+check "одно вложение — одно сообщение" 400 \
+  "$(status POST "$API/messages" "{\"channel_id\":\"$TEXT\",\"attachment_id\":\"$ATT_ID\"}" "$OWNER")"
+
 echo '--- вход по коду ---'
 BRUTE="edge-brute-$S@example.com"
 REAL="$(curl -sf -X POST "$API/auth/send-code" -H 'content-type: application/json' \
