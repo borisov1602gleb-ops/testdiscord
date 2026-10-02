@@ -84,6 +84,54 @@ const MESSAGES = {
   empty_file: 'Файл пустой',
   file_too_large: 'Файл больше 10 МБ',
   unauthorized: 'Нужно войти заново',
+  // служба платформы
+  account_blocked: 'Аккаунт заблокирован службой платформы',
+  account_muted: 'Вы заглушены службой платформы: можно читать, но не писать',
+  community_frozen: 'Сообщество заморожено службой платформы — только чтение',
+  community_not_found: 'Сообщество не найдено',
+  invites_disabled: 'Приглашения этого сообщества закрыты службой платформы',
+  invite_limit_reached: 'Слишком много приглашений за сутки — попробуйте завтра',
+  community_limit_reached: 'Достигнут предел сообществ на одного человека',
+  registration_closed: 'Регистрация новых аккаунтов временно закрыта',
+  invalid_target: 'Неизвестно, на что жалоба',
+  cannot_report_yourself: 'На себя жаловаться нельзя',
+  user_not_found: 'Человек не найден',
+  reason_required: 'Укажите причину',
+  reason_too_long: 'Причина слишком длинная',
+  response_required: 'Напишите ответ человеку',
+  authority_required: 'Укажите орган, приславший запрос',
+  request_number_required: 'Укажите номер запроса',
+  target_outranks_you: 'Этот человек не младше вас по роли',
+  cannot_target_yourself: 'Это действие нельзя применить к себе',
+  cannot_change_own_role: 'Свою роль поменять нельзя',
+  superadmin_by_config_only: 'Суперадминистратор задаётся только в настройках сервера',
+  invalid_sanction_kind: 'Неизвестная мера',
+  invalid_days: 'Срок — 1, 7 или 30 дней',
+  sanction_not_found: 'Мера не найдена',
+  already_revoked: 'Мера уже снята',
+  final_decision: 'Удаление по требованию госоргана не обжалуется и не отменяется',
+  message_already_purged: 'Срок хранения прошёл — сообщение уже не вернуть',
+  community_already_purged: 'Срок хранения прошёл — сообщество уже не вернуть',
+  message_already_deleted: 'Сообщение уже удалено',
+  report_closed: 'Жалоба уже разобрана',
+  already_escalated: 'Жалоба уже передана выше',
+  escalated_needs_admin: 'Переданную выше жалобу решает администратор',
+  appeal_too_short: 'Опишите подробнее — хотя бы пару предложений',
+  appeal_too_long: 'Обжалование слишком длинное',
+  already_appealed: 'Обжалование уже подано — второй раз нельзя',
+  not_appealable: 'Это решение не обжалуется',
+  sanction_not_active: 'Мера уже не действует',
+  appeal_window_closed: 'Срок обжалования истёк',
+  appeal_not_found: 'Обжалование не найдено',
+  appeal_closed: 'Обжалование уже рассмотрено',
+  own_decision: 'Своё решение рассматривает другой сотрудник',
+  issuer_outranks_you: 'Решение старшего по роли рассматривает старший',
+  invalid_decision: 'Неизвестное решение',
+  unknown_setting: 'Неизвестная настройка',
+  invalid_setting: 'Недопустимое значение настройки',
+  no_changes: 'Нечего сохранять',
+  community_deleted: 'Сообщество удалено',
+  already_owner: 'Он и так владелец',
 };
 
 export class ApiError extends Error {
@@ -132,6 +180,11 @@ async function readResponse(res, { tooLarge } = {}) {
     if (res.status === 401 && store.isAuthenticated) {
       store.clearSession();
       location.hash = '#/login';
+    }
+    // Аккаунт заблокирован службой платформы — показываем экран блокировки
+    // с причиной и обжалованием, где бы человек ни был.
+    if (res.status === 403 && data.error === 'account_blocked' && location.hash !== '#/blocked') {
+      location.hash = '#/blocked';
     }
     const code = res.status === 413 && tooLarge ? tooLarge : data.error;
     throw new ApiError(code, res.status, data.details);

@@ -5,6 +5,10 @@
 # создаёт базу и применяет схему, если их ещё нет, и стартует backend.
 # Повторный запуск ничего не ломает — можно запускать каждый раз.
 
+# .\start.ps1 -Demo — перед запуском заполнить базу демо-данными для проверки
+# ролей платформы (аккаунты super@test.ru, admin@test.ru, moder@test.ru и др.).
+param([switch]$Demo)
+
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
@@ -80,7 +84,13 @@ if (-not (Test-Path (Join-Path $PSScriptRoot "backend\node_modules"))) {
   npm install --prefix backend
 }
 
-# --- 5. Backend ---
+# --- 5. Демо-данные (по желанию) ---
+if ($Demo) {
+  Write-Host "Заполняю базу демо-данными..."
+  node backend/scripts/seed-demo.mjs
+}
+
+# --- 6. Backend ---
 # Миграции и таблицы аналитических слоёв backend применит сам при старте.
 Write-Host ""
 Write-Host "Открывай http://localhost:3000 — остановить можно по Ctrl+C." -ForegroundColor Green

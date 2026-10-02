@@ -21,6 +21,16 @@ export function mount(...children) {
   app.replaceChildren(...children);
 }
 
+// Окно поверх экрана; щелчок мимо закрывает.
+export function showModal(card) {
+  const scrim = el('div', { class: 'modal-scrim' }, [card]);
+  scrim.addEventListener('click', (e) => {
+    if (e.target === scrim) scrim.remove();
+  });
+  document.getElementById('app').append(scrim);
+  return scrim;
+}
+
 export function formatTime(iso) {
   return new Date(iso).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
 }
@@ -55,6 +65,27 @@ const ICONS = {
     shapes: [
       ['circle', { cx: 8, cy: 8, r: 6.2, stroke: 'currentColor', 'stroke-width': 1.3 }],
       ['circle', { cx: 8, cy: 8, r: 2.2, fill: 'currentColor' }],
+    ],
+  },
+  // Весы — «подать апелляцию».
+  scales: {
+    box: 24,
+    shapes: [
+      ['path', { d: 'M12 4v16M8 20h8M5 7h14M12 4.5l-1 2.5h2z', stroke: 'currentColor', 'stroke-width': 1.6, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }],
+      ['path', { d: 'M6 7l-3 6.5a3 3 0 006 0zM18 7l-3 6.5a3 3 0 006 0z', stroke: 'currentColor', 'stroke-width': 1.6, 'stroke-linejoin': 'round' }],
+    ],
+  },
+  send: {
+    box: 24,
+    shapes: [
+      ['path', { d: 'M4 12l16-7-6 16-3-7zM11 14l9-9', stroke: 'currentColor', 'stroke-width': 1.6, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }],
+    ],
+  },
+  checkCircle: {
+    box: 24,
+    shapes: [
+      ['circle', { cx: 12, cy: 12, r: 9, fill: 'currentColor', opacity: 0.2 }],
+      ['path', { d: 'M8 12.5l2.6 2.5L16 9.5', stroke: 'currentColor', 'stroke-width': 1.8, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }],
     ],
   },
   plus: {

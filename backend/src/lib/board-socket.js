@@ -5,6 +5,7 @@
 // Готовые элементы сохраняются в базу и рассылаются остальным; черновики и
 // курсоры — только рассылаются: их много, и они живут доли секунды.
 import { query } from '../db.js';
+import { getStanding } from './platform.js';
 import { getChannel, requireChannelAccess, hasPermission } from './access.js';
 import { getProfile } from './users.js';
 import {
@@ -43,6 +44,17 @@ async function emitPeers(io, channelId) {
     if (who && !peers.has(who.id)) peers.set(who.id, who);
   }
   io.to(room(channelId)).emit('board:peers', { channel_id: channelId, peers: [...peers.values()] });
+}
+
+// Заглушённый платформой смотрит на доску, но не рисует; в замороженном
+// сообществе доска только для просмотра.
+async function requireCanDraw(entry) {
+  if (entry.userId && (await getStanding(entry.userId)).mute) throw new BoardError('muted');
+  const { rows } = await query(
+    'SELECT c.platform_status FROM boards b JOIN channels ch ON ch.id = b.channel_id JOIN communities c ON c.id = ch.community_id WHERE b.id = $1',
+    [entry.boardId],
+  );
+  if (rows[0]?.platform_status === 'frozen') throw new BoardError('community_frozen');
 }
 
 export function registerBoardHandlers(io, socket) {
@@ -87,13 +99,16 @@ export function registerBoardHandlers(io, socket) {
       socket.data.boardWho = who;
 
       const boardId = await getBoardId(channel.id);
-      socket.data.boards.set(channel.id, { boardId, role, name: who.name, userId: socket.data.user?.id ?? null });
+      const muted = socket.data.user ? Boolean((await getStanding(socket.data.user.id)).mute) : false;
+      const canDraw = !muted && channel.community_status !== 'frozen';
+      socket.data.boards.set(channel.id, { boardId, role, name: who.name, userId: socket.data.user?.id ?? null, canDraw });
       socket.join(room(channel.id));
       ack?.({
         ok: true,
         me: who,
         elements: await listElements(boardId),
-        can_clear: hasPermission(role, 'delete_any_message'),
+        can_clear: canDraw && hasPermission(role, 'delete_any_message'),
+        can_draw: canDraw,
       });
       await emitPeers(io, channel.id);
     } catch (err) {
@@ -118,6 +133,7 @@ export function registerBoardHandlers(io, socket) {
       const channelId = String(payload?.channel_id ?? '');
       const entry = entryFor(channelId);
       if (!entry || limited(socket, 'upsert')) throw new BoardError('forbidden');
+      await requireCanDraw(entry);
       const element = cleanElement(payload.element);
       const saved = await saveElement(entry.boardId, element, { userId: entry.userId, name: entry.name });
       socket.to(room(channelId)).emit('board:upsert', { channel_id: channelId, element: saved });
@@ -132,6 +148,7 @@ export function registerBoardHandlers(io, socket) {
       const channelId = String(payload?.channel_id ?? '');
       const entry = entryFor(channelId);
       if (!entry || limited(socket, 'delete') || !Array.isArray(payload.ids)) throw new BoardError('forbidden');
+      await requireCanDraw(entry);
       const ids = await deleteElements(entry.boardId, payload.ids);
       if (ids.length) socket.to(room(channelId)).emit('board:delete', { channel_id: channelId, ids });
       ack?.({ ok: true, ids });
@@ -145,7 +162,8 @@ export function registerBoardHandlers(io, socket) {
   socket.on('board:draft', (payload) => {
     try {
       const channelId = String(payload?.channel_id ?? '');
-      if (!entryFor(channelId) || limited(socket, 'draft')) return;
+      const entry = entryFor(channelId);
+      if (!entry || !entry.canDraw || limited(socket, 'draft')) return;
       // Картинку черновиком не гоняем: она тяжёлая, её просто сохраняют.
       if (payload.element?.type === 'image') return;
       const element = cleanElement(payload.element);
@@ -176,6 +194,7 @@ export function registerBoardHandlers(io, socket) {
       const channelId = String(payload?.channel_id ?? '');
       const entry = entryFor(channelId);
       if (!entry || !hasPermission(entry.role, 'delete_any_message')) throw new BoardError('forbidden');
+      await requireCanDraw(entry);
       await clearBoard(entry.boardId);
       io.to(room(channelId)).emit('board:cleared', { channel_id: channelId });
       ack?.({ ok: true });

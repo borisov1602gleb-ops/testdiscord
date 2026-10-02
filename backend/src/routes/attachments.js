@@ -23,7 +23,8 @@ import { config } from '../config.js';
 import { attachmentUrl, avatarUrl, verifySignature } from '../lib/signed-urls.js';
 import { asyncHandler, HttpError } from '../lib/http.js';
 import { requireAuth } from '../middleware/auth.js';
-import { requireMembership, getChannel, requireChannelAccess, isChatChannel } from '../lib/access.js';
+import { requireNotMuted } from '../lib/platform.js';
+import { requireMembership, getChannel, requireChannelAccess, isChatChannel, requireChannelWritable } from '../lib/access.js';
 import { parseUuid } from '../lib/validate.js';
 
 export const attachmentsRouter = Router();
@@ -97,12 +98,14 @@ attachmentsRouter.post(
   asyncHandler(async (req, res) => {
     // Файл загружается в канал (в том числе в личную переписку). Старый
     // способ — в сообщество целиком — оставлен для совместимости.
+    requireNotMuted(req.user);
     let communityId = null;
     let channelId = null;
     if (req.query.channel_id) {
       const channel = await getChannel(parseUuid(req.query.channel_id, 'channel_id'));
       if (!isChatChannel(channel)) throw new HttpError(400, 'channel_is_not_text');
       await requireChannelAccess(req.user.id, channel);
+      requireChannelWritable(channel);
       channelId = channel.id;
       communityId = channel.community_id;
     } else {

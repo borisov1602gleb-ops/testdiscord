@@ -10,6 +10,7 @@ import {
   channelVisibleSql, getChannel,
 } from '../lib/access.js';
 import { parseUuid } from '../lib/validate.js';
+import { requireNotMuted, getSetting } from '../lib/platform.js';
 import { PUBLIC_NAME_SQL, publicNameSql } from '../lib/users.js';
 import { avatarUrl } from '../lib/signed-urls.js';
 import { rawBody, contentTypeOf, saveUpload, IMAGE_TYPES } from './attachments.js';
@@ -85,7 +86,7 @@ function emitToUserChannelsChanged(userId, communityId) {
 }
 
 // Изменился участник (роль, теги) — открытые вкладки перерисуют подписи.
-async function announceMember(communityId, userId) {
+export async function announceMember(communityId, userId) {
   const [member] = await listMembers(communityId, userId);
   if (member) emitToCommunity(communityId, 'member_updated', { community_id: communityId, member });
 }
@@ -121,6 +122,14 @@ communitiesRouter.post(
   asyncHandler(async (req, res) => {
     const name = String(req.body?.name ?? '').trim();
     if (!name) throw new HttpError(400, 'name_required');
+    requireNotMuted(req.user);
+    const limit = Number(await getSetting('max_communities_per_user', 20));
+    const { rows: [owned] } = await query(
+      `SELECT count(*)::int AS n FROM communities
+       WHERE owner_id = $1 AND platform_status <> 'deleted'`,
+      [req.user.id],
+    );
+    if (owned.n >= limit) throw new HttpError(429, 'community_limit_reached', { max: limit });
 
     const created = await withTransaction(async (client) => {
       const { rows: communityRows } = await client.query(
@@ -188,7 +197,7 @@ communitiesRouter.get(
       `SELECT c.*, m.role
        FROM community_members m
        JOIN communities c ON c.id = m.community_id
-       WHERE m.user_id = $1
+       WHERE m.user_id = $1 AND c.platform_status <> 'deleted'
        ORDER BY m.joined_at`,
       [req.user.id],
     );

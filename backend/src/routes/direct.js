@@ -5,6 +5,7 @@ import { Router } from 'express';
 import { query, withTransaction } from '../db.js';
 import { asyncHandler, HttpError } from '../lib/http.js';
 import { requireAuth } from '../middleware/auth.js';
+import { requireNotMuted } from '../lib/platform.js';
 import { getChannel, requireChannelAccess } from '../lib/access.js';
 import { parseUuid } from '../lib/validate.js';
 import { isOnline } from '../lib/realtime.js';
@@ -95,6 +96,7 @@ directRouter.post(
   requireAuth,
   asyncHandler(async (req, res) => {
     const otherId = parseUuid(req.body?.user_id, 'user_id');
+    requireNotMuted(req.user);
     const me = req.user.id;
     if (otherId === me) throw new HttpError(400, 'cannot_message_yourself');
 

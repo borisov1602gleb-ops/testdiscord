@@ -5,7 +5,8 @@
 // назначает модераторов и переименовывает сообщество. Права проверяет
 // сервер, интерфейс лишь не показывает лишнего.
 import { api } from '../api.js';
-import { el, mount, icon } from '../dom.js';
+import { el, mount, icon, showModal } from '../dom.js';
+import { platformReportForm } from '../platform.js';
 import { avatarNode, pickAndUploadAvatar } from '../avatar.js';
 import { navigate } from '../router.js';
 import { showInviteModal } from './home.js';
@@ -966,6 +967,30 @@ export async function renderCommunity(communityId) {
                 }),
               ]),
               leaveNote,
+              el('div', { class: 'settings-row' }, [
+                icon('flag', 18),
+                el('div', {}, [
+                  el('p', { class: 'row-title', text: 'Пожаловаться на сообщество' }),
+                  el('p', {
+                    class: 'row-note',
+                    text: 'Если всё сообщество нарушает правила — например, создано для мошенничества. Жалоба уйдёт в службу платформы.',
+                  }),
+                ]),
+                el('button', {
+                  class: 'btn btn-ghost btn-sm',
+                  type: 'button',
+                  text: 'Пожаловаться',
+                  onclick: () => {
+                    const scrim = showModal(el('div', { class: 'modal' }, [
+                      el('h2', { class: 'modal-title', text: `Пожаловаться: ${community.name}` }),
+                      ...platformReportForm({ targetType: 'community', targetId: communityId, onDone: () => scrim.remove() }),
+                      el('div', { class: 'modal-actions' }, [
+                        el('button', { class: 'btn btn-secondary', type: 'button', text: 'Отмена', onclick: () => scrim.remove() }),
+                      ]),
+                    ]));
+                  },
+                }),
+              ]),
             ]),
         ]),
       ]),

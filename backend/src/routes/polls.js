@@ -4,7 +4,8 @@ import { Router } from 'express';
 import { query, withTransaction } from '../db.js';
 import { asyncHandler, HttpError } from '../lib/http.js';
 import { requireAuth } from '../middleware/auth.js';
-import { getChannel, requireChannelAccess, hasPermission } from '../lib/access.js';
+import { requireNotMuted } from '../lib/platform.js';
+import { getChannel, requireChannelAccess, hasPermission, requireChannelWritable } from '../lib/access.js';
 import { parseUuid } from '../lib/validate.js';
 import { emitToChannel } from '../lib/realtime.js';
 import { loadPolls } from './messages.js';
@@ -43,8 +44,10 @@ pollsRouter.put(
   requireAuth,
   asyncHandler(async (req, res) => {
     const pollId = parseUuid(req.params.id, 'poll_id');
+    requireNotMuted(req.user);
     const poll = await getPollForUser(pollId, req.user.id);
     if (poll.closed_at) throw new HttpError(410, 'poll_closed');
+    requireChannelWritable(poll.channel);
     if (!Array.isArray(req.body?.option_ids)) throw new HttpError(400, 'invalid_vote');
     const optionIds = [...new Set(req.body.option_ids.map((id) => parseUuid(id, 'option_ids')))];
     if (!poll.multiple && optionIds.length > 1) throw new HttpError(400, 'single_choice_poll');

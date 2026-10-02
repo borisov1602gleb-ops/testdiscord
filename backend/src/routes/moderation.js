@@ -2,7 +2,8 @@
 // удалить или оставить. Жалобы группируются по сообщению: десять жалоб на
 // один спам — это одна задача, а не десять.
 import { Router } from 'express';
-import { query } from '../db.js';
+import { query, withTransaction } from '../db.js';
+import { notifyPlatformStaff } from '../lib/platform-notify.js';
 import { asyncHandler, HttpError } from '../lib/http.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requirePermission, getChannel } from '../lib/access.js';
@@ -112,5 +113,53 @@ moderationRouter.post(
       await notifyModerators(communityId);
     }
     res.json({ resolved: true, action });
+  }),
+);
+
+// Передать жалобы на сообщение в службу платформы: модераторы сообщества
+// не справляются сами, нарушение серьёзное или оно касается владельца.
+// Жалобы сообщества закрываются со статусом «передано», а у платформы
+// появляется одна жалоба с их сутью.
+moderationRouter.post(
+  '/:id/reports/:messageId/escalate',
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const communityId = parseUuid(req.params.id, 'community_id');
+    const messageId = parseUuid(req.params.messageId, 'message_id');
+    await requirePermission(req.user.id, communityId, 'handle_reports');
+    const note = String(req.body?.comment ?? '').trim().slice(0, 500) || null;
+
+    const { rows } = await query(
+      `SELECT r.reason, r.comment, m.user_id AS author_id
+       FROM message_reports r JOIN messages m ON m.id = r.message_id
+       WHERE r.message_id = $1 AND r.community_id = $2 AND r.status = 'open'`,
+      [messageId, communityId],
+    );
+    if (rows.length === 0) throw new HttpError(404, 'report_not_found');
+    // Причина — самая частая среди жалоб; комментарии сводятся в один.
+    const counts = new Map();
+    for (const r of rows) counts.set(r.reason, (counts.get(r.reason) ?? 0) + 1);
+    const reason = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+    const comment = [note && `Модератор сообщества: ${note}`,
+      ...rows.map((r) => r.comment).filter(Boolean).map((c) => `Жалоба: ${c}`)]
+      .filter(Boolean).join('\n').slice(0, 2000) || null;
+
+    await withTransaction(async (client) => {
+      await client.query(
+        `INSERT INTO platform_reports
+           (target_type, message_id, target_user_id, community_id, reporter_id, source, reason, comment)
+         VALUES ('message', $1, $2, $3, $4, 'community', $5, $6)
+         ON CONFLICT DO NOTHING`,
+        [messageId, rows[0].author_id, communityId, req.user.id, reason, comment],
+      );
+      await client.query(
+        `UPDATE message_reports SET status = 'escalated', resolved_at = now(), resolved_by = $2
+         WHERE message_id = $1 AND status = 'open'`,
+        [messageId, req.user.id],
+      );
+    });
+    await notifyModerators(communityId);
+    await notifyPlatformStaff();
+    res.json({ escalated: true });
   }),
 );

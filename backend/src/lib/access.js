@@ -4,13 +4,28 @@
 import { query } from '../db.js';
 import { HttpError } from './http.js';
 
-export async function requireMembership(userId, communityId) {
+// Удалённое платформой сообщество не видно никому — даже его участникам.
+async function membership(userId, communityId) {
   const { rows } = await query(
-    'SELECT role FROM community_members WHERE community_id = $1 AND user_id = $2',
+    `SELECT cm.role, c.platform_status
+     FROM community_members cm JOIN communities c ON c.id = cm.community_id
+     WHERE cm.community_id = $1 AND cm.user_id = $2`,
     [communityId, userId],
   );
   if (rows.length === 0) throw new HttpError(403, 'not_a_community_member');
-  return rows[0].role;
+  if (rows[0].platform_status === 'deleted') throw new HttpError(404, 'community_not_found');
+  return rows[0];
+}
+
+export async function requireMembership(userId, communityId) {
+  return (await membership(userId, communityId)).role;
+}
+
+// Состояние сообщества на платформе: active, invites_hidden, frozen, deleted.
+export async function communityStatus(communityId) {
+  const { rows } = await query('SELECT platform_status FROM communities WHERE id = $1', [communityId]);
+  if (rows.length === 0) throw new HttpError(404, 'community_not_found');
+  return rows[0].platform_status;
 }
 
 // У личной переписки сразу подтягиваются её двое участников: по ним
@@ -18,6 +33,7 @@ export async function requireMembership(userId, communityId) {
 export async function getChannel(channelId) {
   const { rows } = await query(
     `SELECT c.id, c.community_id, c.name, c.type, c.is_private, c.read_only,
+            (SELECT platform_status FROM communities WHERE id = c.community_id) AS community_status,
             CASE WHEN c.type = 'direct'
               THEN (SELECT array_agg(user_id) FROM direct_members WHERE channel_id = c.id)
             END AS member_ids,
@@ -76,8 +92,14 @@ export async function requireChannelAccess(userId, channel) {
   return role;
 }
 
+// Замороженное платформой сообщество — только для чтения у всех.
+export function requireChannelWritable(channel) {
+  if (channel.community_status === 'frozen') throw new HttpError(403, 'community_frozen');
+}
+
 // Писать в канал «только для чтения» могут старшие роли.
 export function requireCanPost(channel, role) {
+  requireChannelWritable(channel);
   if (channel.read_only && !hasPermission(role, 'post_read_only')) {
     throw new HttpError(403, 'channel_read_only');
   }
@@ -130,10 +152,17 @@ export function permissionsFor(role) {
   return Object.keys(PERMISSIONS).filter((p) => hasPermission(role, p));
 }
 
+// В замороженном платформой сообществе ничего нового не создаётся и не
+// настраивается. Удалять нарушения и исключать людей при этом можно.
+const BLOCKED_WHEN_FROZEN = new Set(['manage_tags', 'manage_channels', 'manage_community', 'manage_roles', 'pin_messages']);
+
 export async function requirePermission(userId, communityId, permission) {
-  const role = await requireMembership(userId, communityId);
+  const { role, platform_status: status } = await membership(userId, communityId);
   if (!hasPermission(role, permission)) {
     throw new HttpError(403, 'not_allowed', { permission });
+  }
+  if (status === 'frozen' && BLOCKED_WHEN_FROZEN.has(permission)) {
+    throw new HttpError(403, 'community_frozen');
   }
   return role;
 }

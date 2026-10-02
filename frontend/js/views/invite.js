@@ -42,9 +42,14 @@ export async function renderInvite(inviteId) {
         el('span', { class: 'invite-kicker', text: 'Приглашение в сообщество' }),
         el('h1', {
           class: 'empty-title',
-          text: 'Срок действия приглашения истёк или оно исчерпано',
+          text: preview.restricted
+            ? 'Приглашения в это сообщество закрыты службой платформы'
+            : 'Срок действия приглашения истёк или оно исчерпано',
         }),
-        el('p', { class: 'invite-hint', text: 'Попросите новую ссылку у того, кто вас позвал' }),
+        el('p', {
+          class: 'invite-hint',
+          text: preview.restricted ? 'Вступить сейчас нельзя' : 'Попросите новую ссылку у того, кто вас позвал',
+        }),
       ],
       true,
     );
