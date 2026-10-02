@@ -4,6 +4,7 @@
 import jwt from 'jsonwebtoken';
 import { config } from '../config.js';
 import { HttpError } from '../lib/http.js';
+import { getStanding, blockError } from '../lib/platform.js';
 
 export function signToken(user) {
   return jwt.sign({ sub: user.id, email: user.email }, config.jwtSecret, {
@@ -26,15 +27,29 @@ function readUser(req) {
   }
 }
 
-// Гостевые сценарии (превью инвайта, подключение к звонку по ссылке)
-// работают без токена, поэтому авторизация здесь опциональна.
-export function optionalAuth(req, _res, next) {
-  req.user = readUser(req);
-  next();
+// К пользователю из токена добавляется его положение на платформе: роль
+// и действующие меры. Заблокированный дальше не проходит нигде, кроме
+// маршрутов обжалования (allowBlocked) — так блокировка срабатывает сразу,
+// даже если вкладка у человека открыта.
+async function attachStanding(req, { allowBlocked = false } = {}) {
+  const standing = await getStanding(req.user.id);
+  req.user.platformRole = standing.role;
+  req.user.mute = standing.mute;
+  req.user.block = standing.block;
+  if (standing.block && !allowBlocked) throw blockError(standing.block);
 }
 
-export function requireAuth(req, _res, next) {
-  req.user = readUser(req);
-  if (!req.user) return next(new HttpError(401, 'unauthorized'));
-  return next();
+function authMiddleware({ required, allowBlocked = false }) {
+  return (req, _res, next) => {
+    req.user = readUser(req);
+    if (!req.user) return next(required ? new HttpError(401, 'unauthorized') : undefined);
+    return attachStanding(req, { allowBlocked }).then(() => next(), next);
+  };
 }
+
+// Гостевые сценарии (превью инвайта, подключение к звонку по ссылке)
+// работают без токена, поэтому авторизация здесь опциональна.
+export const optionalAuth = authMiddleware({ required: false });
+export const requireAuth = authMiddleware({ required: true });
+// Только для экрана блокировки и подачи обжалования.
+export const requireAuthAllowBlocked = authMiddleware({ required: true, allowBlocked: true });

@@ -19,6 +19,7 @@ import {
 } from './access.js';
 import { getProfile } from './users.js';
 import { verifyBoardToken } from './boards.js';
+import { getStanding } from './platform.js';
 import { registerBoardHandlers } from './board-socket.js';
 
 let io = null;
@@ -102,11 +103,19 @@ export function initRealtime(httpServer) {
   io.use((socket, next) => {
     const token = socket.handshake.auth?.token;
     if (!token) return next(new Error('unauthorized'));
+    let user = null;
     try {
-      socket.data.user = verifyToken(token);
-      return next();
+      user = verifyToken(token);
     } catch {
       /* может быть пропуском гостя */
+    }
+    if (user) {
+      // Заблокированный платформой не подключается вовсе.
+      return getStanding(user.id).then((standing) => {
+        if (standing.block) return next(new Error('account_blocked'));
+        socket.data.user = user;
+        return next();
+      }, () => next(new Error('unavailable')));
     }
     try {
       socket.data.guest = verifyBoardToken(token);
@@ -176,6 +185,8 @@ export function initRealtime(httpServer) {
         const channel = await getChannel(channelId);
         if (!isChatChannel(channel)) return;
         await requireChannelAccess(userId, channel);
+        // Заглушённый не пишет — и «печатает…» от него не нужно.
+        if ((await getStanding(userId)).mute) return;
         const profile = await getProfile(userId);
         // socket.to — всем, кроме этой вкладки. Свои же другие вкладки
         // отсеивает клиент по user_id.
@@ -192,6 +203,12 @@ export function initRealtime(httpServer) {
   });
 
   return io;
+}
+
+// Заблокированного выводим из всех вкладок сразу: соединения рвутся, а
+// переподключиться ему не даст проверка при входе.
+export function disconnectUser(userId) {
+  io?.in(`user:${userId}`).disconnectSockets(true);
 }
 
 // Исключённый участник перестаёт получать события сообщества сразу же.

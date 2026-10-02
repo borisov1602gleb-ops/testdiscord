@@ -8,7 +8,8 @@ import { query, withTransaction } from '../db.js';
 import { asyncHandler, HttpError } from '../lib/http.js';
 import { logEvent, EVENT_TYPES } from '../lib/events.js';
 import { requireAuth, optionalAuth } from '../middleware/auth.js';
-import { requireMembership } from '../lib/access.js';
+import { requireMembership, communityStatus } from '../lib/access.js';
+import { requireNotMuted, getSetting } from '../lib/platform.js';
 import { parseUuid } from '../lib/validate.js';
 
 export const invitesRouter = Router();
@@ -18,7 +19,18 @@ invitesRouter.post(
   requireAuth,
   asyncHandler(async (req, res) => {
     const communityId = parseUuid(req.body?.community_id, 'community_id');
+    requireNotMuted(req.user);
     await requireMembership(req.user.id, communityId);
+    // Сообщество, которому платформа скрыла приглашения или которое
+    // заморозила, новых ссылок не выдаёт.
+    if ((await communityStatus(communityId)) !== 'active') throw new HttpError(403, 'invites_disabled');
+    const perDay = Number(await getSetting('max_invites_per_day', 50));
+    const { rows: [made] } = await query(
+      `SELECT count(*)::int AS n FROM invites
+       WHERE created_by = $1 AND created_at > now() - interval '1 day'`,
+      [req.user.id],
+    );
+    if (made.n >= perDay) throw new HttpError(429, 'invite_limit_reached', { max_per_day: perDay });
 
     const { expires_at: expiresAt, max_uses: maxUses } = req.body ?? {};
     if (maxUses != null && (!Number.isInteger(maxUses) || maxUses < 1)) {
@@ -48,15 +60,19 @@ invitesRouter.get(
   asyncHandler(async (req, res) => {
     const inviteId = parseUuid(req.params.id, 'invite_id');
     const { rows } = await query(
-      `SELECT i.*, c.name AS community_name
+      `SELECT i.*, c.name AS community_name, c.platform_status
        FROM invites i
        JOIN communities c ON c.id = i.community_id
        WHERE i.id = $1`,
       [inviteId],
     );
-    if (rows.length === 0) throw new HttpError(404, 'invite_not_found');
+    // Удалённое платформой сообщество для ссылки как будто не существует.
+    if (rows.length === 0 || rows[0].platform_status === 'deleted') {
+      throw new HttpError(404, 'invite_not_found');
+    }
 
     const invite = rows[0];
+    const restricted = invite.platform_status !== 'active';
     const expired = invite.expires_at != null && new Date(invite.expires_at) <= new Date();
     const exhausted = invite.max_uses != null && invite.use_count >= invite.max_uses;
 
@@ -92,7 +108,10 @@ invitesRouter.get(
       community: { id: invite.community_id, name: invite.community_name },
       voice_channel: voiceChannels[0] ?? null,
       anonymous_id: anonymousId,
-      valid: !expired && !exhausted,
+      valid: !expired && !exhausted && !restricted,
+      // Почему ссылка не работает: истекла или исчерпана — или сообщество
+      // ограничено платформой.
+      restricted,
     });
   }),
 );
@@ -118,6 +137,11 @@ invitesRouter.post(
       if (invite.max_uses != null && invite.use_count >= invite.max_uses) {
         throw new HttpError(410, 'invite_exhausted');
       }
+      const { rows: [community] } = await client.query(
+        'SELECT platform_status FROM communities WHERE id = $1', [invite.community_id],
+      );
+      if (community.platform_status === 'deleted') throw new HttpError(404, 'invite_not_found');
+      if (community.platform_status !== 'active') throw new HttpError(403, 'invites_disabled');
 
       // Забаненного не пускает ни одна ссылка — даже новая.
       const { rows: bans } = await client.query(

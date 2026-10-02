@@ -4,10 +4,14 @@ import { render } from './router.js';
 import { el, mount } from './dom.js';
 
 window.addEventListener('unhandledrejection', (event) => {
+  // Истёкшая сессия и блокировка — не сбой: api.js уже увёл человека на
+  // вход или на экран блокировки, показывать поверх «что-то сломалось»
+  // незачем.
+  if (event.reason?.status === 401 || event.reason?.code === 'account_blocked') {
+    event.preventDefault();
+    return;
+  }
   console.error(event.reason);
-  // Истёкшая сессия уже увела на экран входа (см. api.js) — показывать
-  // поверх него «что-то сломалось» незачем.
-  if (event.reason?.status === 401) return;
   mount(
     el('div', { class: 'centered' }, [
       el('div', { class: 'card' }, [

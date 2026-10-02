@@ -94,6 +94,10 @@ jobs:
         working-directory: backend
         run: node scripts/ws-test.mjs
 
+      - name: Служба платформы — роли, меры, обжалования, журнал
+        working-directory: backend
+        run: node scripts/platform-test.mjs
+
       - name: Превью ссылок — защита от запросов во внутреннюю сеть
         working-directory: backend
         run: node scripts/preview-test.mjs

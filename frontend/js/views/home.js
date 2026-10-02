@@ -4,21 +4,29 @@
 // вход в голосовой канал.
 import { api } from '../api.js';
 import { store } from '../store.js';
-import { el, mount, icon, initial, logo } from '../dom.js';
+import { el, mount, icon, initial, logo, showModal } from '../dom.js';
 import { playChime } from '../settings.js';
 import { navigate } from '../router.js';
 import { createChat, formatFull } from './chat.js';
 import { can, tagChip, roleBadge } from '../roles.js';
 import { avatarNode } from '../avatar.js';
 import { showNotification, plainText } from '../notify.js';
+import {
+  loadPlatform, noticeBar, onPlatformChange, isStaff, platformState, setQueue, queueTotal,
+  platformReportForm, untilText,
+} from '../platform.js';
 
 let socket = null;
 let activeChats = [];
+// Подписки экрана, которые надо снять при уходе с него.
+let viewCleanup = [];
 
 export function disconnectRealtime() {
   socket?.disconnect();
   socket = null;
   activeChats = [];
+  viewCleanup.forEach((off) => off());
+  viewCleanup = [];
 }
 
 // Вернулся во вкладку — значит, увидел то, что пришло, пока его не было.
@@ -69,6 +77,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
     api('/communities'),
     api('/direct'),
     api('/users/me/notifications').catch(() => ({ settings: [] })),
+    loadPlatform(),
   ]);
   // Уровни уведомлений: канал → сообщество → по умолчанию. По умолчанию
   // в сообществе — только упоминания, в личке — все сообщения.
@@ -154,8 +163,33 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
     onOpenThread: openThread,
     onAuthorClick: direct ? null : startDirect,
     onTyping: (payload) => socket?.emit('typing', payload),
+    writeBlock,
   });
   activeChats = [chat];
+
+  // Почему сейчас нельзя писать: заглушение платформой или заморозка
+  // сообщества. Текст попадает в подсказку поля ввода.
+  function writeBlock() {
+    const mute = platformState()?.mute;
+    if (mute) return `Вы заглушены ${untilText(mute.ends_at)}`;
+    if (!direct && community?.platform_status === 'frozen') return 'Сообщество заморожено — только чтение';
+    return null;
+  }
+
+  // Над лентой: уведомления о мерах и состояние сообщества.
+  const communityBanner = el('div', { class: 'platform-notice is-community' });
+  function drawCommunityBanner() {
+    const status = direct ? 'active' : community?.platform_status;
+    const text = {
+      frozen: 'Сообщество заморожено службой платформы: можно читать, но не писать и не звонить.',
+      invites_hidden: 'Приглашения в сообщество закрыты службой платформы: новые люди не могут вступить.',
+    }[status];
+    communityBanner.hidden = !text;
+    communityBanner.replaceChildren(icon('shield', 16), el('p', { class: 'platform-notice-text', text: text ?? '' }));
+  }
+  drawCommunityBanner();
+  chat.node.insertBefore(el('div', { class: 'platform-slot' }, [noticeBar(), communityBanner]), chat.node.children[1]);
+  viewCleanup.push(onPlatformChange(() => chat.applyWriteState()));
 
   // ===== колонки =====
 
@@ -373,7 +407,8 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
       hasChannel && notifyButton(),
       !direct && headButton('members', 'Участники', 'people', showMembers),
       !direct && can(permissions, 'handle_reports') && reportsButton(),
-      !direct &&
+      // Ограниченному платформой сообществу новых ссылок не выдают.
+      !direct && community.platform_status === 'active' &&
         el('button', {
           class: 'btn btn-primary btn-sm',
           type: 'button',
@@ -657,6 +692,14 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
       ]),
       m.id !== me &&
         el('button', { class: 'btn btn-secondary btn-sm member-dm', type: 'button', text: 'Написать', onclick: () => startDirect(m.id) }),
+      m.id !== me &&
+        el('button', {
+          class: 'icon-btn member-report',
+          type: 'button',
+          title: 'Пожаловаться в службу платформы',
+          'aria-label': 'Пожаловаться в службу платформы',
+          onclick: () => reportUserModal(m),
+        }, [icon('flag', 15)]),
     ]);
   }
 
@@ -1015,6 +1058,11 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
       if (cid !== community?.id) return;
       try {
         const data = await api(`/communities/${cid}`);
+        // Служба платформы могла заморозить сообщество или вернуть его.
+        community.platform_status = data.community.platform_status;
+        drawCommunityBanner();
+        drawHeadActions();
+        chat.applyWriteState();
         textChannels = data.channels.filter((c) => c.type === 'text');
         voiceChannels = data.channels.filter((c) => c.type === 'voice');
         const fresh = textChannels.find((c) => c.id === activeChannel?.id);
@@ -1032,6 +1080,11 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
         /* подтянется при следующем открытии */
       }
     });
+    // Служба платформы приняла решение по мне или ответила на обжалование.
+    socket.on('standing_changed', () => {
+      loadPlatform();
+    });
+    socket.on('platform_queue', (queue) => setQueue(queue));
     socket.on('voice_changed', ({ channel_id: channelId }) => {
       if (voiceChannels.some((c) => c.id === channelId)) refreshVoice();
     });
@@ -1145,6 +1198,11 @@ function userZone() {
       icon('profile', 16),
       'Профиль',
     ]),
+    el('button', { class: 'menu-item', type: 'button', onclick: () => navigate('#/standing') }, [
+      icon('flag', 16),
+      'Меры и обжалования',
+    ]),
+    isStaff() && platformMenuItem(),
     el(
       'button',
       {
@@ -1192,6 +1250,36 @@ function userZone() {
   return zone;
 }
 
+// Жалоба на человека — в службу платформы.
+function reportUserModal(member) {
+  const scrim = showModal(el('div', { class: 'modal' }, [
+    el('h2', { class: 'modal-title', text: `Пожаловаться: ${member.name}` }),
+    el('p', { class: 'report-hint', text: 'Жалоба уйдёт в службу платформы — например, если человек пишет вам в личку что-то недопустимое.' }),
+    ...platformReportForm({ targetType: 'user', targetId: member.id, onDone: () => scrim.remove() }),
+    el('div', { class: 'modal-actions' }, [
+      el('button', { class: 'btn btn-secondary', type: 'button', text: 'Отмена', onclick: () => scrim.remove() }),
+    ]),
+  ]));
+}
+
+// Пункт меню панели платформы — со счётчиком того, что ждёт разбора.
+function platformMenuItem() {
+  const count = el('span', { class: 'count-pill' });
+  const item = el('button', { class: 'menu-item', type: 'button', onclick: () => navigate('#/admin') }, [
+    icon('shield', 16),
+    'Панель платформы',
+    count,
+  ]);
+  const draw = () => {
+    const total = queueTotal();
+    count.hidden = total === 0;
+    count.textContent = String(total);
+  };
+  draw();
+  viewCleanup.push(onPlatformChange(draw));
+  return item;
+}
+
 function renderEmptyState(conversations = []) {
   mount(
     el('div', { class: 'empty' }, [
@@ -1216,6 +1304,13 @@ function renderEmptyState(conversations = []) {
             text: 'Личные сообщения',
             onclick: () => navigate('#/dm'),
           }),
+        isStaff() &&
+          el('button', {
+            class: 'btn btn-secondary',
+            type: 'button',
+            text: 'Панель платформы',
+            onclick: () => navigate('#/admin'),
+          }),
         el('button', {
           class: 'btn btn-secondary',
           type: 'button',
@@ -1228,15 +1323,6 @@ function renderEmptyState(conversations = []) {
       ]),
     ]),
   );
-}
-
-function showModal(card) {
-  const scrim = el('div', { class: 'modal-scrim' }, [card]);
-  scrim.addEventListener('click', (e) => {
-    if (e.target === scrim) scrim.remove();
-  });
-  document.getElementById('app').append(scrim);
-  return scrim;
 }
 
 function showCommunityModal() {

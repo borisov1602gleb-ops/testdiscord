@@ -7,7 +7,7 @@ import { query, withTransaction } from '../db.js';
 import { asyncHandler, HttpError } from '../lib/http.js';
 import { logEvent, EVENT_TYPES } from '../lib/events.js';
 import { optionalAuth } from '../middleware/auth.js';
-import { getChannel, requireChannelAccess } from '../lib/access.js';
+import { getChannel, requireChannelAccess, requireChannelWritable } from '../lib/access.js';
 import { parseUuid } from '../lib/validate.js';
 import { createCallToken } from '../lib/livekit.js';
 import { getProfile } from '../lib/users.js';
@@ -24,11 +24,15 @@ export const callsRouter = Router();
 // по ссылке не пускаем.
 async function authorizeCallAccess({ user, channel, inviteId, anonymousId }) {
   const communityId = channel.community_id;
+  // Замороженное платформой сообщество — только для чтения: звонков нет.
+  requireChannelWritable(channel);
   if (user) {
     await requireChannelAccess(user.id, channel);
     return;
   }
   if (channel.is_private) throw new HttpError(403, 'private_channel');
+  // Гости приходят по ссылке, а ссылки у ограниченного сообщества не работают.
+  if (channel.community_status !== 'active') throw new HttpError(403, 'invites_disabled');
   if (!anonymousId) throw new HttpError(400, 'anonymous_id_required');
   if (!inviteId) throw new HttpError(401, 'invite_id_required_for_guest');
 
@@ -174,6 +178,8 @@ callsRouter.post(
       roomName: callId,
       identity,
       name: profile?.public_name ?? 'guest',
+      // Заглушённый платформой слушает, но говорить и показывать не может.
+      canPublish: !req.user?.mute,
     });
 
     await logJoin('success', call.community_id);

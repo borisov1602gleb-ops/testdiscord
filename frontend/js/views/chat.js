@@ -9,6 +9,7 @@ import { store } from '../store.js';
 import { el, formatTime, icon, initial } from '../dom.js';
 import { renderRich, firstLink, safeHref } from '../rich-text.js';
 import { avatarNode } from '../avatar.js';
+import { platformReportForm } from '../platform.js';
 
 // Тот же набор, что на сервере: другие реакции он не примет.
 const REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🔥'];
@@ -101,6 +102,9 @@ export function createChat({
   onOpenThread,
   onAuthorClick,
   onTyping,
+  // Почему сейчас нельзя писать: заглушение платформой, заморозка
+  // сообщества. null — можно.
+  writeBlock = () => null,
 }) {
   const me = store.user?.id;
   // В личке модерации нет: чужое сообщение не удалить никому.
@@ -449,8 +453,9 @@ export function createChat({
       bar.append(tool(message.pinned ? 'Открепить' : 'Закрепить', 'pin', () => togglePin(message)));
     }
     if (own && !message.poll) bar.append(tool('Изменить', 'pencil', () => startEdit(message)));
-    // Пожаловаться — на чужое сообщение в сообществе; в личке модерации нет.
-    if (!own && channel?.type !== 'direct') {
+    // Пожаловаться на чужое сообщение: модераторам сообщества или в службу
+    // платформы; в личке — только в службу платформы.
+    if (!own) {
       const reportButton = tool('Пожаловаться', 'flag', (event) => {
         event.stopPropagation();
         showReportForm(message, reportButton);
@@ -506,7 +511,10 @@ export function createChat({
     ]);
 
     if (message.deleted) {
-      body.append(el('p', { class: 'msg-text msg-gone', text: 'Сообщение удалено' }));
+      body.append(el('p', {
+        class: `msg-text msg-gone${message.removed_by_platform ? ' msg-gone-platform' : ''}`,
+        text: message.removed_by_platform ? 'Удалено модерацией платформы' : 'Сообщение удалено',
+      }));
     } else {
       if (message.content) {
         body.append(el('div', { class: 'msg-text' }, renderRich(message.content, { mentions: mentionTokens(message) })));
@@ -571,13 +579,22 @@ export function createChat({
     cancelEdit();
     closePopover();
     jumpButton.hidden = true;
-    // В канале «только для чтения» пишут старшие роли; остальным поле
-    // ввода показываем выключенным, с объяснением.
-    const canWrite = !next.read_only || permissions.includes('post_read_only');
-    for (const control of [input, sendButton, attachButton, micButton, pollButton]) control.disabled = !canWrite;
-    composer.classList.toggle('is-readonly', !canWrite);
+    applyWriteState();
     feed.replaceChildren(topSlot);
     topSlot.textContent = '';
+  }
+
+  // В канале «только для чтения» пишут старшие роли; заглушённый и
+  // участник замороженного сообщества не пишут нигде. Поле ввода тогда
+  // выключено, а в подсказке — почему.
+  let basePlaceholder = '';
+  function applyWriteState() {
+    if (!channel) return;
+    const blocked = writeBlock();
+    const canWrite = !blocked && (!channel.read_only || permissions.includes('post_read_only'));
+    for (const control of [input, sendButton, attachButton, micButton, pollButton]) control.disabled = !canWrite;
+    composer.classList.toggle('is-readonly', !canWrite);
+    if (basePlaceholder) input.placeholder = blocked ?? basePlaceholder;
   }
 
   // ===== загрузка =====
@@ -589,10 +606,11 @@ export function createChat({
     resetFeed(next);
     if (heading !== undefined) title.textContent = heading;
     else if (!isThread) title.textContent = next.type === 'direct' ? next.name : `# ${next.name}`;
-    input.placeholder = placeholder
+    basePlaceholder = placeholder
       ?? (next.read_only && !permissions.includes('post_read_only')
         ? 'Канал объявлений — пишут только модераторы'
         : isThread ? 'Ответить в треде' : next.type === 'direct' ? 'Написать сообщение' : `Написать в #${next.name}`);
+    applyWriteState();
 
     if (isThread) return openThread(token);
 
@@ -1351,6 +1369,9 @@ export function createChat({
   // ===== жалобы =====
 
   function showReportForm(message, anchor) {
+    // Куда жалоба: в сообществе — модераторам сообщества или в службу
+    // платформы, в личке — только в службу.
+    if (channel?.type === 'direct') return showPlatformReport(message, anchor);
     let reason = null;
     const comment = el('input', { class: 'input', type: 'text', maxlength: '500', placeholder: 'Комментарий — по желанию' });
     const status = el('p', { class: 'report-status' });
@@ -1386,7 +1407,25 @@ export function createChat({
         }
       },
     });
-    showPopover(anchor, [el('p', { class: 'readers-title', text: 'Пожаловаться на сообщение' }), reasons, comment, submit, status]);
+    const toPlatform = el('button', {
+      class: 'report-switch',
+      type: 'button',
+      text: 'Серьёзное нарушение? Пожаловаться в службу платформы',
+      onclick: () => showPlatformReport(message, anchor),
+    });
+    showPopover(anchor, [el('p', { class: 'readers-title', text: 'Пожаловаться модераторам сообщества' }), reasons, comment, submit, status, toPlatform]);
+    openPopover.classList.add('popover-report');
+  }
+
+  function showPlatformReport(message, anchor) {
+    closePopover();
+    showPopover(anchor, [
+      el('p', { class: 'readers-title', text: 'Пожаловаться в службу платформы' }),
+      el('p', { class: 'report-hint', text: channel?.type === 'direct'
+        ? 'Служба платформы увидит это сообщение и несколько сообщений перед ним.'
+        : 'Для серьёзных нарушений и жалоб на владельца сообщества.' }),
+      ...platformReportForm({ targetType: 'message', targetId: message.id, onDone: closePopover }),
+    ]);
     openPopover.classList.add('popover-report');
   }
 
@@ -1487,7 +1526,7 @@ export function createChat({
     redraw(message.id, { ...message, read_count: current.read_count });
   }
 
-  function onDeleted({ id, channel_id: channelId, thread_id: threadId }) {
+  function onDeleted({ id, channel_id: channelId, thread_id: threadId, removed_by_platform: byPlatform = false }) {
     if (channelId !== channel?.id) return;
     // Удалили ответ в треде — в общей ленте уменьшаем счётчик под корнем.
     if (!isThread && threadId) {
@@ -1501,7 +1540,7 @@ export function createChat({
     if (!items.has(id) || items.get(id).message.deleted) return;
     if (editing?.id === id) editing = null;
     if (replyTo?.id === id) cancelReply();
-    redraw(id, { deleted: true, content: '', attachment: null, reactions: [], mentions: [], pinned: false });
+    redraw(id, { deleted: true, removed_by_platform: byPlatform, content: '', attachment: null, reactions: [], mentions: [], pinned: false });
     // Ответы на удалённое тоже показывают, что его больше нет.
     for (const item of items.values()) {
       if (item.message.reply?.id === id) {
@@ -1578,6 +1617,7 @@ export function createChat({
     onReadUpdate,
     onTypingEvent,
     focus: () => input.focus(),
+    applyWriteState,
     get channelId() {
       return channel?.id ?? null;
     },

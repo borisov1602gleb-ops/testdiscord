@@ -13,6 +13,8 @@ import { initRealtime } from './lib/realtime.js';
 import { applySchema } from './lib/schema.js';
 import { startEtlScheduler } from './etl/index.js';
 import { startCallSweeper } from './lib/call-sweeper.js';
+import { startPlatformSweeper } from './lib/platform-sweeper.js';
+import { syncSuperadmins } from './lib/platform.js';
 import { authRouter } from './routes/auth.js';
 import { usersRouter } from './routes/users.js';
 import { communitiesRouter } from './routes/communities.js';
@@ -26,6 +28,7 @@ import { attachmentsRouter } from './routes/attachments.js';
 import { moderationRouter } from './routes/moderation.js';
 import { pollsRouter } from './routes/polls.js';
 import { previewsRouter } from './routes/previews.js';
+import { platformRouter } from './routes/platform.js';
 
 export const app = express();
 // На этапе MVP клиент и API живут на одном адресе, поэтому cors() открыт
@@ -67,6 +70,7 @@ app.use('/direct', directRouter);
 app.use('/attachments', attachmentsRouter);
 app.use('/polls', pollsRouter);
 app.use('/link-preview', previewsRouter);
+app.use('/platform', platformRouter);
 
 app.use((_req, res) => res.status(404).json({ error: 'not_found' }));
 app.use(errorHandler);
@@ -78,10 +82,13 @@ await waitForDatabase();
 // Идемпотентные миграции и таблицы слоёв применяются при старте, поэтому
 // обновление кода не требует отдельного шага «накатить миграцию».
 await applySchema();
+// Суперадминистраторы — из настроек сервера (SUPERADMIN_EMAILS).
+await syncSuperadmins();
 server.listen(config.port, () => {
   console.log(`[backend] listening on :${config.port}`);
   startEtlScheduler();
   startCallSweeper();
+  startPlatformSweeper();
 });
 
 for (const signal of ['SIGTERM', 'SIGINT']) {

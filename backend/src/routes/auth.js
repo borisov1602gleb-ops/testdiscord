@@ -11,6 +11,7 @@ import { sendLoginCode } from '../lib/mailer.js';
 import { signToken } from '../middleware/auth.js';
 import { config } from '../config.js';
 import { getProfile } from '../lib/users.js';
+import { getSetting, isConfiguredSuperadmin } from '../lib/platform.js';
 
 export const authRouter = Router();
 
@@ -113,11 +114,17 @@ authRouter.post(
       let user = existing[0];
       const isNewUser = !user;
       if (isNewUser) {
+        const superadmin = isConfiguredSuperadmin(normalizedEmail);
+        // Регистрацию можно закрыть в настройках платформы; суперадминистратор
+        // из настроек сервера зайдёт всё равно.
+        if (!superadmin && (await getSetting('registration_open', true)) === false) {
+          throw new HttpError(403, 'registration_closed');
+        }
         const { rows } = await client.query(
-          `INSERT INTO users (email, registration_source)
-           VALUES ($1, $2)
+          `INSERT INTO users (email, registration_source, platform_role)
+           VALUES ($1, $2, $3)
            RETURNING id, email, registration_source, created_at`,
-          [normalizedEmail, source || 'email_code'],
+          [normalizedEmail, source || 'email_code', superadmin ? 'superadmin' : 'user'],
         );
         user = rows[0];
       }

@@ -10,8 +10,9 @@ import { logEvent, EVENT_TYPES } from '../lib/events.js';
 import { requireAuth } from '../middleware/auth.js';
 import {
   requireMembership, getChannel, requireChannelAccess, isChatChannel, hasPermission,
-  requireCanPost, usersWithAccess, channelVisibleSql,
+  requireCanPost, usersWithAccess, channelVisibleSql, requireChannelWritable,
 } from '../lib/access.js';
+import { requireNotMuted } from '../lib/platform.js';
 import { parseUuid } from '../lib/validate.js';
 import { emitToChannel } from '../lib/realtime.js';
 import { PUBLIC_NAME_SQL, publicNameSql } from '../lib/users.js';
@@ -70,6 +71,7 @@ const READER_HAS_ACCESS = `(
 const MESSAGE_SELECT = `
   SELECT m.id, m.channel_id, m.user_id, m.content, m.created_at,
          m.edited_at, m.deleted_at, m.reply_to, m.thread_id, m.pinned_at,
+         m.platform_removed_at,
          ch.community_id, ch.type AS channel_type, ch.name AS channel_name,
          ${PUBLIC_NAME_SQL} AS author_name, u.avatar_id AS author_avatar_id,
          r.id AS reply_id, r.content AS reply_content, r.deleted_at AS reply_deleted_at,
@@ -161,6 +163,8 @@ async function hydrate(rows) {
       created_at: row.created_at,
       edited_at: row.edited_at,
       deleted,
+      // Удалено службой платформы: в ленте — «Удалено модерацией платформы».
+      removed_by_platform: row.platform_removed_at != null,
       thread_id: row.thread_id,
       thread_count: row.thread_count ?? 0,
       thread_last_at: row.thread_last_at ?? null,
@@ -223,7 +227,7 @@ export async function loadPolls(messageIds) {
   return byMessage;
 }
 
-async function loadMessage(messageId, viewerId) {
+export async function loadMessage(messageId, viewerId) {
   const { rows } = await query(`${MESSAGE_SELECT} WHERE m.id = $2`, [viewerId, messageId]);
   const [message] = await hydrate(rows);
   return message ?? null;
@@ -387,6 +391,7 @@ messagesRouter.post(
     const replyTo = req.body?.reply_to ? parseUuid(req.body.reply_to, 'reply_to') : null;
     const threadId = req.body?.thread_id ? parseUuid(req.body.thread_id, 'thread_id') : null;
 
+    requireNotMuted(req.user);
     const { channel, role } = await getChatChannel(channelId, req.user.id);
     requireCanPost(channel, role);
 
@@ -659,6 +664,8 @@ messagesRouter.patch(
     // переписывать нельзя, только удалить.
     if (target.user_id !== req.user.id) throw new HttpError(403, 'not_message_author');
     if (target.deleted_at) throw new HttpError(410, 'message_deleted');
+    requireNotMuted(req.user);
+    requireChannelWritable(target.channel);
 
     const { rows: current } = await query(
       `SELECT attachment_id IS NOT NULL
@@ -778,8 +785,10 @@ messagesRouter.put(
     if (!REACTIONS.includes(emoji)) {
       throw new HttpError(400, 'invalid_reaction', { allowed: REACTIONS });
     }
+    requireNotMuted(req.user);
     const target = await getMessageForUser(messageId, req.user.id);
     if (target.deleted_at) throw new HttpError(410, 'message_deleted');
+    requireChannelWritable(target.channel);
 
     const removed = await query(
       `DELETE FROM message_reactions

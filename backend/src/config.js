@@ -40,6 +40,17 @@ export const config = {
     // Возврат кода в HTTP-ответе нужен только для локальных e2e-прогонов.
     exposeInResponse: process.env.EXPOSE_DEV_CODE === 'true',
   },
+  platform: {
+    // Почты суперадминистраторов через запятую. Если переменная не задана,
+    // роли в базе не трогаются (так работает и наполнение демо-данными).
+    superadminEmails: process.env.SUPERADMIN_EMAILS
+      ? process.env.SUPERADMIN_EMAILS.split(',').map((e) => e.trim().toLowerCase()).filter(Boolean)
+      : null,
+    // Сколько дней хранится скрытое платформой (сообщения, удалённые
+    // сообщества) и сколько дней можно подать обжалование.
+    retentionDays: Number(process.env.PLATFORM_RETENTION_DAYS ?? 30),
+    appealWindowDays: Number(process.env.APPEAL_WINDOW_DAYS ?? 30),
+  },
   livekit: {
     url: process.env.LIVEKIT_URL || 'ws://localhost:7880',
     apiKey: process.env.LIVEKIT_API_KEY || 'devkey',
