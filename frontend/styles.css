@@ -2480,6 +2480,7 @@ button.tag-chip.is-active {
 
 .report-actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: var(--sp-2);
   padding: 0 var(--sp-3) var(--sp-3);
