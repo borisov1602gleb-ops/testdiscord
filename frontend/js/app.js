@@ -25,4 +25,14 @@ window.addEventListener('unhandledrejection', (event) => {
   );
 });
 
+// Вход хранится один на адрес сайта: если в соседней вкладке вошли под
+// другим аккаунтом или вышли, эта вкладка иначе продолжала бы показывать
+// прежнего человека, а запросы слала бы уже от нового. Перерисовываемся
+// сразу, чтобы было видно, чей вход сейчас действует.
+window.addEventListener('storage', (event) => {
+  if (event.key !== 'token' && event.key !== null) return;
+  location.hash = '#/';
+  location.reload();
+});
+
 render();
