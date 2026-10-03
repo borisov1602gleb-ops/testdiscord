@@ -456,6 +456,28 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
         button.textContent = err.message;
       }
     }
+    // Серьёзное нарушение или жалоба на владельца — пусть решает служба
+    // платформы. Второе нажатие подтверждает.
+    async function escalate(button) {
+      if (!button.classList.contains('is-armed')) {
+        button.classList.add('is-armed');
+        button.textContent = 'Точно передать?';
+        setTimeout(() => {
+          if (!button.isConnected) return;
+          button.classList.remove('is-armed');
+          button.textContent = 'В службу платформы';
+        }, 3000);
+        return;
+      }
+      button.disabled = true;
+      try {
+        await api(`/communities/${community.id}/reports/${message.id}/escalate`, { method: 'POST', body: {} });
+        showReports();
+      } catch (err) {
+        button.disabled = false;
+        button.textContent = err.message;
+      }
+    }
     return el('div', { class: 'panel-card report-card' }, [
       el('button', { class: 'panel-item', type: 'button', onclick: () => jumpTo(message) }, [
         el('span', { class: 'panel-meta' }, [
@@ -464,7 +486,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
           el('span', { class: 'panel-time', text: formatFull(message.created_at) }),
           el('span', { class: 'panel-tag report-count', text: `жалоб: ${reports.length}` }),
         ]),
-        el('span', { class: 'panel-text', text: message.content || 'сообщение без текста' }),
+        el('span', { class: 'panel-text', text: plainText(message.content) || 'сообщение без текста' }),
       ]),
       el('ul', { class: 'report-list' }, reports.map((r) =>
         el('li', {}, [
@@ -473,6 +495,13 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
           r.comment && el('span', { class: 'report-comment', text: `: «${r.comment}»` }),
         ]))),
       el('div', { class: 'report-actions' }, [
+        el('button', {
+          class: 'btn btn-ghost btn-sm',
+          type: 'button',
+          text: 'В службу платформы',
+          title: 'Серьёзное нарушение — передать жалобу администрации всей платформы',
+          onclick: (e) => escalate(e.currentTarget),
+        }),
         el('button', {
           class: 'btn btn-secondary btn-sm',
           type: 'button',
