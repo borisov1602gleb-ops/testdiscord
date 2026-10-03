@@ -198,6 +198,7 @@ function renderBlocked(state) {
           ]),
         ]),
         actionSlot,
+        el('p', { class: 'blocked-who', text: `Вы вошли как ${store.user?.email ?? ''}` }),
         el('div', { class: 'blocked-links' }, [
           el('button', { class: 'blocked-link', type: 'button', text: 'Проверить снова', onclick: () => navigate('#/') }),
           el('button', {

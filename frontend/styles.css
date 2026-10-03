@@ -4475,6 +4475,12 @@ button.tag-chip.is-active {
   font-size: 13px;
 }
 
+.blocked-who {
+  margin: calc(-1 * var(--sp-3)) 0 0;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
 .blocked-links {
   display: flex;
   gap: var(--sp-5);
