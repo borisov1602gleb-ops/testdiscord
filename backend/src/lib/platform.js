@@ -25,6 +25,7 @@ export const PLATFORM_PERMISSIONS = {
   revoke_any_sanction: 'admin',         // снять чужую меру
   view_users: 'admin',                  // поиск людей, их сообщества и история мер
   manage_communities: 'admin',          // скрыть приглашения, заморозить, передать
+  inspect_communities: 'admin',         // открыть сообщество для проверки (только чтение)
   manage_moderators: 'admin',           // назначать и снимать модераторов платформы
   review_appeals: 'admin',              // рассматривать обжалования
   view_stats: 'admin',                  // статистика всей платформы
@@ -123,6 +124,24 @@ export function requireNotMuted(user) {
 export async function requireNotMutedById(userId) {
   const standing = await getStanding(userId);
   requireNotMuted(standing);
+}
+
+// ===== проверка сообщества =====
+// Сколько длится проверка: потом нужно открыть заново, с новой причиной.
+export const INSPECTION_MINUTES = 60;
+
+// Действующая проверка этого сообщества этим сотрудником. Роль
+// перепроверяется: снятый с должности теряет доступ сразу.
+export async function activeInspection(userId, communityId) {
+  const standing = await getStanding(userId);
+  if (!platformCan(standing.role, 'inspect_communities')) return null;
+  const { rows } = await query(
+    `SELECT id, expires_at FROM platform_inspections
+     WHERE staff_id = $1 AND community_id = $2 AND expires_at > now()
+     ORDER BY expires_at DESC LIMIT 1`,
+    [userId, communityId],
+  );
+  return rows[0] ?? null;
 }
 
 // ===== состояние сообщества =====

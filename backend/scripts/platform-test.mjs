@@ -295,6 +295,39 @@ check('администратор закрывает', st(await api(`/platform/s
   method: 'POST', token: adm.token, body: { reason: 'приняты меры' },
 })) === 200);
 
+console.log('--- проверка сообщества изнутри ---');
+const { channel: secret } = await must(`/communities/${community.id}/channels`, {
+  method: 'POST', token: anna.token, body: { name: 'секретный', type: 'text', is_private: true },
+});
+await must('/messages', { method: 'POST', token: anna.token, body: { channel_id: secret.id, content: 'только для своих' } });
+const inspect = (who, body) => api(`/platform/staff/communities/${community.id}/inspect`, { method: 'POST', token: who.token, body });
+check('до проверки администратор в сообщество не заходит', st(await api(`/communities/${community.id}`, { token: adm.token })) === 403);
+check('модератор платформы проверять не может', st(await inspect(mod, { reason: 'x' })) === 403);
+check('без причины проверку не открыть', st(await inspect(adm, {})) === 400);
+const inspectRes = await inspect(adm, { reason: 'жалобы на спам', report_id: escalated.id });
+check('администратор открывает сообщество для проверки', st(inspectRes) === 201 && Boolean(inspectRes.data.inspection.expires_at));
+const inspected = await must(`/communities/${community.id}`, { token: adm.token });
+check('роль — «проверяющий», прав нет', inspected.role === 'inspector' && inspected.permissions.length === 0 && Boolean(inspected.inspection));
+check('видны только открытые текстовые каналы', inspected.channels.every((c) => c.type === 'text' && !c.is_private)
+  && inspected.channels.some((c) => c.id === text.id) && !inspected.channels.some((c) => c.id === secret.id));
+check('ленту открытого канала читает', st(await api(`/messages?channel_id=${text.id}`, { token: adm.token })) === 200);
+check('закрытый канал — нет', st(await api(`/messages?channel_id=${secret.id}`, { token: adm.token })) === 403);
+const inspectSearch = await must(`/messages/search?community_id=${community.id}&q=${encodeURIComponent('только для своих')}`, { token: adm.token });
+check('поиск не находит закрытое', inspectSearch.messages.length === 0);
+check('личку участников — нет', st(await api(`/messages?channel_id=${conversation.id}`, { token: adm.token })) === 403);
+check('участников видит', st(await api(`/communities/${community.id}/members`, { token: adm.token })) === 200);
+check('писать не может', st(await api('/messages', { method: 'POST', token: adm.token, body: { channel_id: text.id, content: 'я тут' } })) === 403);
+check('реакции не ставит', st(await api(`/messages/${feed[1].id}/reactions`, { method: 'PUT', token: adm.token, body: { emoji: '👍' } })) === 403);
+check('настройки не меняет', st(await api(`/communities/${community.id}/channels`, { method: 'POST', token: adm.token, body: { name: 'x', type: 'text' } })) === 403);
+check('в участниках его нет — сообщество не знает о проверке', !(await must(`/communities/${community.id}/members`, { token: anna.token })).members.some((m) => m.id === adm.id));
+const { rows: inspectAudit } = await pool.query(
+  "SELECT reason FROM staff_audit_log WHERE action = 'community_inspection' AND actor_id = $1 AND target_id = $2", [adm.id, community.id],
+);
+check('проверка записана в журнал с причиной', inspectAudit.length === 1 && inspectAudit[0].reason === 'жалобы на спам');
+await pool.query('UPDATE platform_inspections SET expires_at = now() - interval \'1 minute\' WHERE staff_id = $1', [adm.id]);
+check('через час доступ закрывается сам', st(await api(`/messages?channel_id=${text.id}`, { token: adm.token })) === 403);
+check('и сообщество снова не открыть', st(await api(`/communities/${community.id}`, { token: adm.token })) === 403);
+
 console.log('--- журнал ---');
 const auditOf = async (who) => (await must('/platform/staff/audit', { token: who.token })).entries;
 const modAudit = await auditOf(mod);

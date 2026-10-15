@@ -90,7 +90,9 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
   let conversations = directData.conversations;
   if (!direct) {
     if (!communityId && communities.length > 0) return navigate(`#/c/${communities[0].id}`);
-    if (communities.length === 0) return renderEmptyState(conversations);
+    // Сотрудник платформы может открыть чужое сообщество для проверки,
+    // даже не состоя ни в одном своём.
+    if (communities.length === 0 && !communityId) return renderEmptyState(conversations);
   }
 
   const me = store.user?.id;
@@ -110,13 +112,23 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
   let voiceChannels = [];
   let unread = new Map();
   let voice = {};
+  // Служба платформы открыла сообщество для проверки: человек в нём не
+  // состоит, видит только открытые каналы и ничего не может менять.
+  let inspection = null;
   if (!direct) {
     // role приходит из того же запроса: по нему решаем, показывать ли
     // владельцу аналитику и закрепление. Сервер всё равно проверяет сам.
-    const data = await api(`/communities/${communityId}`);
+    let data;
+    try {
+      data = await api(`/communities/${communityId}`);
+    } catch (err) {
+      if (communities.length === 0) return renderEmptyState(conversations);
+      throw err;
+    }
     community = data.community;
     role = data.role;
     permissions = data.permissions ?? [];
+    if (role === 'inspector') inspection = data.inspection;
     textChannels = data.channels.filter((c) => c.type === 'text');
     voiceChannels = data.channels.filter((c) => c.type === 'voice');
     const [membersData, unreadData, voiceData] = await Promise.all([
@@ -161,15 +173,17 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
     decorateAuthor: direct ? null : decorateAuthor,
     onRead: clearUnread,
     onOpenThread: openThread,
-    onAuthorClick: direct ? null : startDirect,
+    onAuthorClick: direct || inspection ? null : startDirect,
     onTyping: (payload) => socket?.emit('typing', payload),
     writeBlock,
+    readOnly: Boolean(inspection),
   });
   activeChats = [chat];
 
   // Почему сейчас нельзя писать: заглушение платформой или заморозка
   // сообщества. Текст попадает в подсказку поля ввода.
   function writeBlock() {
+    if (inspection) return 'Режим проверки — только чтение';
     const mute = platformState()?.mute;
     if (mute) return `Вы заглушены ${untilText(mute.ends_at)}`;
     if (!direct && community?.platform_status === 'frozen') return 'Сообщество заморожено — только чтение';
@@ -179,6 +193,19 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
   // Над лентой: уведомления о мерах и состояние сообщества.
   const communityBanner = el('div', { class: 'platform-notice is-community' });
   function drawCommunityBanner() {
+    if (inspection) {
+      communityBanner.hidden = false;
+      communityBanner.classList.add('is-inspection');
+      communityBanner.replaceChildren(
+        icon('shield', 16),
+        el('p', {
+          class: 'platform-notice-text',
+          text: `Режим проверки службы платформы: только чтение открытых каналов, до ${new Date(inspection.expires_at).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}. Сообщество об этом не уведомляется, просмотр записан в журнал.`,
+        }),
+        el('button', { class: 'btn btn-ghost btn-sm', type: 'button', text: 'Выйти', onclick: () => navigate('#/admin') }),
+      );
+      return;
+    }
     const status = direct ? 'active' : community?.platform_status;
     const text = {
       frozen: 'Сообщество заморожено службой платформы: можно читать, но не писать и не звонить.',
@@ -286,7 +313,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
           ],
         );
       }),
-      el('div', { class: 'chan-group', text: 'Голосовые' }),
+      !inspection && el('div', { class: 'chan-group', text: 'Голосовые' }),
       ...voiceChannels.flatMap((channel) => {
         const people = voice[channel.id] ?? [];
         return [
@@ -307,8 +334,8 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
       // Состав сообщества виден всем участникам, аналитика — только
       // владельцу. Это подсказка интерфейса, а не защита: права
       // всё равно проверяет сервер.
-      el('div', { class: 'chan-group', text: 'Сообщество' }),
-      el(
+      !inspection && el('div', { class: 'chan-group', text: 'Сообщество' }),
+      !inspection && el(
         'button',
         { class: 'chan-item', type: 'button', onclick: () => navigate(`#/c/${community.id}/settings`) },
         [
@@ -404,11 +431,11 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
     headActions.replaceChildren(...[
       hasChannel && headButton('search', direct ? 'Поиск в переписке' : 'Поиск по сообществу', 'search', showSearch),
       hasChannel && headButton('pins', 'Закреплённые', 'pin', showPins),
-      hasChannel && notifyButton(),
+      hasChannel && !inspection && notifyButton(),
       !direct && headButton('members', 'Участники', 'people', showMembers),
       !direct && can(permissions, 'handle_reports') && reportsButton(),
       // Ограниченному платформой сообществу новых ссылок не выдают.
-      !direct && community.platform_status === 'active' &&
+      !direct && !inspection && community.platform_status === 'active' &&
         el('button', {
           class: 'btn btn-primary btn-sm',
           type: 'button',
@@ -797,6 +824,8 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
       thread: root,
       onRead: clearUnread,
       onTyping: (payload) => socket?.emit('typing', payload),
+      writeBlock,
+      readOnly: Boolean(inspection),
     });
     activeChats = [chat, threadChat];
     threadChat.head.append(

@@ -105,6 +105,9 @@ export function createChat({
   // Почему сейчас нельзя писать: заглушение платформой, заморозка
   // сообщества. null — можно.
   writeBlock = () => null,
+  // Режим проверки службой платформы: только смотреть — ни реакций, ни
+  // голосов, ни отметок «прочитано».
+  readOnly = false,
 }) {
   const me = store.user?.id;
   // В личке модерации нет: чужое сообщение не удалить никому.
@@ -320,7 +323,7 @@ export function createChat({
         return el('button', {
           class: `poll-option${mine.has(option.id) ? ' is-mine' : ''}`,
           type: 'button',
-          disabled: poll.closed ? 'true' : null,
+          disabled: poll.closed || readOnly ? 'true' : null,
           title: count ? option.voter_ids.map(nameOf).join(', ') : 'Пока никто',
           onclick: () => vote(message, option.id),
         }, [
@@ -394,6 +397,7 @@ export function createChat({
           type: 'button',
           title: r.user_ids.includes(me) ? 'Убрать реакцию' : 'Поставить такую же',
           text: `${r.emoji} ${r.count}`,
+          disabled: readOnly ? 'true' : null,
           onclick: () => toggleReaction(message.id, r.emoji),
         }),
       ),
@@ -531,7 +535,7 @@ export function createChat({
     return el('article', { class: classes.join(' '), 'data-id': message.id }, [
       avatarNode(message.author_name, message.author_avatar_url, 'msg-avatar'),
       body,
-      !message.deleted && !root && toolbar(message, own),
+      !message.deleted && !root && !readOnly && toolbar(message, own),
     ]);
   }
 
@@ -746,7 +750,7 @@ export function createChat({
   // даёт один запрос, а не десять. В фоновой вкладке и пока человек
   // листает старое, не отмечаем — он этого ещё не видел.
   function markRead() {
-    if (!channel || document.hidden || hasNewer) return;
+    if (!channel || document.hidden || hasNewer || readOnly) return;
     const channelId = channel.id;
     onRead?.(channelId);
     clearTimeout(readTimer);
