@@ -25,6 +25,7 @@ import {
 } from '../lib/realtime.js';
 import { loadMessage } from './messages.js';
 import { announceMember } from './communities.js';
+import { listEmojis, announceEmojis } from './emojis.js';
 
 export const platformRouter = Router();
 
@@ -164,16 +165,29 @@ async function getSanction(id, client = null) {
 // Для всех: своё положение, уведомления о мерах, обжалования, жалобы.
 // ======================================================================
 
+// За какой срок считаются предупреждения в окне «N-е за 90 дней».
+const WARNING_WINDOW_DAYS = 90;
+
 const SANCTION_VIEW = `
   SELECT s.id, s.kind, s.reason, s.starts_at, s.ends_at, s.final, s.seen_at,
          s.revoked_at, s.revoke_reason, s.created_at, s.message_id, s.community_id,
          c.name AS community_name,
          a.id AS appeal_id, a.status AS appeal_status, a.text AS appeal_text,
          a.response AS appeal_response, a.reviewed_at AS appeal_reviewed_at,
-         a.response_seen_at AS appeal_response_seen_at
+         a.response_seen_at AS appeal_response_seen_at,
+         s.issued_by_role, mch.name AS channel_name, mch.type AS channel_type,
+         -- Какое по счёту это предупреждение за последние 90 дней: в окне
+         -- предупреждения так и пишется — «2-е за 90 дней».
+         CASE WHEN s.kind = 'warning' THEN (
+           SELECT count(*)::int FROM platform_sanctions w
+           WHERE w.user_id = s.user_id AND w.kind = 'warning' AND w.revoked_at IS NULL
+             AND w.created_at <= s.created_at AND w.created_at > s.created_at - interval '${WARNING_WINDOW_DAYS} days'
+         ) END AS warning_number
   FROM platform_sanctions s
   LEFT JOIN communities c ON c.id = s.community_id
-  LEFT JOIN platform_appeals a ON a.sanction_id = s.id`;
+  LEFT JOIN platform_appeals a ON a.sanction_id = s.id
+  LEFT JOIN messages sm ON sm.id = s.message_id
+  LEFT JOIN channels mch ON mch.id = sm.channel_id`;
 
 function describeSanctionForUser(row) {
   const now = Date.now();
@@ -194,6 +208,12 @@ function describeSanctionForUser(row) {
     created_at: row.created_at,
     message_id: row.message_id,
     community: row.community_id ? { id: row.community_id, name: row.community_name } : null,
+    // Кто вынес — ролью, без имени сотрудника: «от модератора платформы».
+    issued_by_role: row.issued_by_role,
+    channel: row.channel_name && row.channel_type !== 'direct' ? { name: row.channel_name } : null,
+    in_direct: row.channel_type === 'direct',
+    warning_number: row.warning_number ?? null,
+    warning_window_days: WARNING_WINDOW_DAYS,
     appeal: row.appeal_id
       ? {
         id: row.appeal_id,
@@ -908,7 +928,7 @@ platformRouter.get(
     const communityId = parseUuid(req.params.id, 'community_id');
     const { rows } = await query(`${STAFF_COMMUNITY} WHERE c.id = $1`, [communityId]);
     if (rows.length === 0) throw new HttpError(404, 'community_not_found');
-    const [members, sanctions, reports] = await Promise.all([
+    const [members, sanctions, reports, emojis] = await Promise.all([
       query(
         `SELECT u.id, ${PUBLIC_NAME_SQL} AS name, u.email, cm.role, u.platform_role
          FROM community_members cm JOIN users u ON u.id = cm.user_id
@@ -928,13 +948,44 @@ platformRouter.get(
          FROM platform_reports WHERE community_id = $1`,
         [communityId],
       ),
+      listEmojis(communityId),
     ]);
     res.json({
       community: rows[0],
       members: members.rows,
       sanctions: sanctions.rows,
       open_reports: reports.rows[0].open,
+      emojis: [...emojis.emojis, ...emojis.stickers],
     });
+  }),
+);
+
+// Убрать недопустимый эмодзи или стикер сообщества. Причина обязательна,
+// решение — в журнале.
+platformRouter.post(
+  '/staff/communities/:id/emojis/:emojiId/remove',
+  requirePlatform('manage_communities'),
+  asyncHandler(async (req, res) => {
+    const communityId = parseUuid(req.params.id, 'community_id');
+    const emojiId = parseUuid(req.params.emojiId, 'emoji_id');
+    const reason = requireReason(req.body?.reason);
+    const removed = await withTransaction(async (client) => {
+      const { rows } = await client.query(
+        `UPDATE community_emojis
+         SET deleted_at = now(), deleted_by = $3, removed_by_platform = true
+         WHERE id = $1 AND community_id = $2 AND deleted_at IS NULL
+         RETURNING kind, name`,
+        [emojiId, communityId, req.user.id],
+      );
+      if (rows.length === 0) throw new HttpError(404, 'emoji_not_found');
+      await audit(req.user, 'community_emoji_removed', {
+        targetType: 'community', targetId: communityId, reason,
+        details: { emoji_id: emojiId, kind: rows[0].kind, name: rows[0].name },
+      }, client);
+      return rows[0];
+    });
+    announceEmojis(communityId);
+    res.json({ removed });
   }),
 );
 

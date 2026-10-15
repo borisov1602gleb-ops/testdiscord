@@ -13,8 +13,13 @@ import { avatarNode } from '../avatar.js';
 import { showNotification, plainText } from '../notify.js';
 import {
   loadPlatform, noticeBar, onPlatformChange, isStaff, platformState, setQueue, queueTotal,
-  platformReportForm, untilText,
+  platformReportForm, untilText, warningCard,
 } from '../platform.js';
+import {
+  loadMyPresence, myPresence, setMyPresence, onMyPresence, isDoNotDisturb, watchIdle,
+  presenceClass, presenceLine, statusText, showStatusModal, PRESENCE_LABELS,
+} from '../presence.js';
+import { eventsPanel, bannerEvent, eventWhen, showReminderToast } from '../events.js';
 
 let socket = null;
 let activeChats = [];
@@ -38,8 +43,9 @@ function countLabel(n) {
   return n > 99 ? '99+' : String(n);
 }
 
-function avatar(name, online, url = null, className = 'person-avatar') {
-  return avatarNode(name, url, `${className}${online ? ' is-online' : ''}`);
+// presence — 'online', 'away', 'dnd' или 'offline': от него цвет точки.
+function avatar(name, presence, url = null, className = 'person-avatar') {
+  return avatarNode(name, url, `${className}${presenceClass(presence)}`);
 }
 
 // Подсветка найденного: запрос ищется без учёта регистра, а в разметку
@@ -78,6 +84,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
     api('/direct'),
     api('/users/me/notifications').catch(() => ({ settings: [] })),
     loadPlatform(),
+    loadMyPresence(),
   ]);
   // Уровни уведомлений: канал → сообщество → по умолчанию. По умолчанию
   // в сообществе — только упоминания, в личке — все сообщения.
@@ -98,7 +105,26 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
   const me = store.user?.id;
   // Кто в сети: заполняется из списков и обновляется событиями presence.
   const presence = new Map();
-  for (const c of conversations) presence.set(c.user.id, c.user.online);
+  // Подробнее: присутствие (online, away, dnd, offline) и подпись.
+  const people = new Map();
+  function remember(user) {
+    presence.set(user.id, user.online);
+    people.set(user.id, { presence: user.presence ?? (user.online ? 'online' : 'offline'), status: user.status ?? null });
+  }
+  function presenceFor(userId) {
+    if (userId === me) {
+      const { mode } = myPresence();
+      // Себя показываем так, как выбрали: «невидимка» видит себя невидимкой,
+      // а «отошёл по бездействию» сервер подскажет событием.
+      if (mode !== 'online') return mode === 'invisible' ? 'offline' : mode;
+      return people.get(me)?.presence === 'away' ? 'away' : 'online';
+    }
+    return people.get(userId)?.presence ?? (presence.get(userId) ? 'online' : 'offline');
+  }
+  function statusFor(userId) {
+    return userId === me ? myPresence().status : people.get(userId)?.status ?? null;
+  }
+  for (const c of conversations) remember(c.user);
 
   // Состояние режима сообщества.
   let community = null;
@@ -108,6 +134,8 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
   // Один и тот же массив на всё время жизни экрана: на него ссылаются
   // чаты (подсказка упоминаний), поэтому меняем содержимое, а не ссылку.
   const tags = [];
+  // Свои эмодзи и стикеры сообщества — тоже один объект на весь экран.
+  const emojiSet = { emojis: [], stickers: [] };
   let textChannels = [];
   let voiceChannels = [];
   let unread = new Map();
@@ -131,14 +159,17 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
     if (role === 'inspector') inspection = data.inspection;
     textChannels = data.channels.filter((c) => c.type === 'text');
     voiceChannels = data.channels.filter((c) => c.type === 'voice');
-    const [membersData, unreadData, voiceData] = await Promise.all([
+    const [membersData, unreadData, voiceData, emojiData] = await Promise.all([
       api(`/communities/${communityId}/members`),
       api(`/communities/${communityId}/unread`),
       api(`/communities/${communityId}/voice`),
+      api(`/communities/${communityId}/emojis`).catch(() => ({ emojis: [], stickers: [] })),
     ]);
+    emojiSet.emojis = emojiData.emojis;
+    emojiSet.stickers = emojiData.stickers;
     members = membersData.members;
     tags.push(...(membersData.tags ?? []));
-    for (const m of members) presence.set(m.id, m.online);
+    for (const m of members) remember(m);
     unread = new Map(unreadData.channels.map((c) => [c.channel_id, c]));
     voice = voiceData.channels;
   }
@@ -154,6 +185,8 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
   let panelKind = null;
   let tagFilter = null; // тег, по которому отфильтрован список участников
   let reportCount = 0; // открытые жалобы — только для модерации
+  let upcomingEvents = []; // ближайшие события сообщества — для плашки над чатом
+  let eventsView = null; // открытая панель событий
 
   // Рядом с именем автора в чате — значок роли и до трёх тегов.
   function decorateAuthor(userId) {
@@ -170,6 +203,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
     permissions,
     members,
     tags,
+    emojis: emojiSet,
     decorateAuthor: direct ? null : decorateAuthor,
     onRead: clearUnread,
     onOpenThread: openThread,
@@ -215,7 +249,37 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
     communityBanner.replaceChildren(icon('shield', 16), el('p', { class: 'platform-notice-text', text: text ?? '' }));
   }
   drawCommunityBanner();
-  chat.node.insertBefore(el('div', { class: 'platform-slot' }, [noticeBar(), communityBanner]), chat.node.children[1]);
+  // Плашка ближайшего события: «Сегодня в 19:00 — созвон» или «идёт сейчас».
+  const eventBanner = el('div', { class: 'event-banner' });
+  eventBanner.hidden = true;
+  function drawEventBanner() {
+    const event = direct ? null : bannerEvent(upcomingEvents);
+    eventBanner.hidden = !event;
+    if (!event) return eventBanner.replaceChildren();
+    eventBanner.classList.toggle('is-live', event.live);
+    eventBanner.replaceChildren(...[
+      icon('calendar', 16),
+      el('p', { class: 'event-banner-text' }, [
+        el('b', { text: event.live ? 'Идёт сейчас' : eventWhen(event) }),
+        ` — ${event.title}`,
+        event.channel && el('span', { class: 'event-banner-where', text: ` · ${event.channel.name}` }),
+      ]),
+      event.live && event.channel && !inspection &&
+        el('button', { class: 'btn btn-primary btn-sm', type: 'button', text: 'Зайти', onclick: () => joinEvent(event) }),
+      el('button', { class: 'btn btn-ghost btn-sm', type: 'button', text: 'Подробнее', onclick: showEvents }),
+    ].filter(Boolean));
+  }
+  async function loadEvents() {
+    if (direct) return;
+    try {
+      ({ events: upcomingEvents } = await api(`/communities/${community.id}/events`));
+    } catch {
+      upcomingEvents = [];
+    }
+    drawEventBanner();
+    drawChannels();
+  }
+  chat.node.insertBefore(el('div', { class: 'platform-slot' }, [warningCard(), noticeBar(), communityBanner, eventBanner]), chat.node.children[1]);
   viewCleanup.push(onPlatformChange(() => chat.applyWriteState()));
 
   // ===== колонки =====
@@ -334,7 +398,18 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
       // Состав сообщества виден всем участникам, аналитика — только
       // владельцу. Это подсказка интерфейса, а не защита: права
       // всё равно проверяет сервер.
-      !inspection && el('div', { class: 'chan-group', text: 'Сообщество' }),
+      el('div', { class: 'chan-group', text: 'Сообщество' }),
+      el(
+        'button',
+        { class: `chan-item${panelKind === 'events' ? ' is-active' : ''}`, type: 'button', onclick: showEvents },
+        [
+          icon('calendar', 16),
+          el('span', { class: 'rail-name', text: 'События' }),
+          upcomingEvents.some((e) => e.live) && el('span', { class: 'count-pill is-live', text: 'идёт', title: 'Встреча идёт сейчас' }),
+          !upcomingEvents.some((e) => e.live) && upcomingEvents.length > 0 &&
+            el('span', { class: 'count-pill', text: String(upcomingEvents.length), title: 'Ближайшие события' }),
+        ],
+      ),
       !inspection && el(
         'button',
         { class: 'chan-item', type: 'button', onclick: () => navigate(`#/c/${community.id}/settings`) },
@@ -367,8 +442,8 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
     }
     secondList.replaceChildren(
       ...conversations.map((conv) => {
-        const online = presence.get(conv.user.id);
         const last = conv.last_message;
+        const status = statusText(statusFor(conv.user.id));
         return el(
           'button',
           {
@@ -377,9 +452,9 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
             onclick: () => openConversation(conv),
           },
           [
-            avatar(conv.user.name, online, conv.user.avatar_url),
+            avatar(conv.user.name, presenceFor(conv.user.id), conv.user.avatar_url),
             el('span', { class: 'dm-texts' }, [
-              el('span', { class: 'dm-name', text: conv.user.name }),
+              el('span', { class: 'dm-name', text: conv.user.name, title: status || null }),
               el('span', {
                 class: 'dm-last',
                 text: last ? `${last.from_me ? 'Вы: ' : ''}${last.text}` : 'Нет сообщений',
@@ -400,9 +475,11 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
         chat.subtitle.textContent = '';
         return;
       }
-      const online = presence.get(activeConversation.user.id);
-      chat.subtitle.textContent = online ? 'в сети' : 'не в сети';
-      chat.subtitle.classList.toggle('is-online', Boolean(online));
+      const userId = activeConversation.user.id;
+      const state = presenceFor(userId);
+      const status = statusText(statusFor(userId));
+      chat.subtitle.textContent = [PRESENCE_LABELS[state].toLowerCase(), status].filter(Boolean).join(' · ');
+      chat.subtitle.classList.toggle('is-online', state === 'online');
     } else {
       const count = members.filter((m) => presence.get(m.id)).length;
       chat.subtitle.textContent = `${count} в сети`;
@@ -546,7 +623,41 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
     ]);
   }
 
+  // ===== события =====
+
+  function eventsContext() {
+    return {
+      communityId: community.id,
+      canManage: can(permissions, 'manage_events'),
+      // Проверяющий от платформы смотрит, но не отвечает.
+      canAnswer: !inspection,
+      voiceChannels,
+      onJoin: joinEvent,
+      reload: () => {
+        eventsView?.reload();
+        loadEvents();
+      },
+    };
+  }
+
+  function showEvents() {
+    eventsView = eventsPanel(eventsContext());
+    openPanel('events', 'События', eventsView.node);
+    drawChannels();
+  }
+
+  // Зайти на встречу: в голосовой канал этого сообщества — сразу, в
+  // другом сообществе — сначала перейти в него.
+  function joinEvent(event) {
+    const communityId = event.community_id ?? community?.id;
+    const channelId = event.channel?.id ?? event.channel_id;
+    if (communityId !== community?.id) return navigate(`#/c/${communityId}`);
+    const channel = voiceChannels.find((c) => c.id === channelId);
+    if (channel) joinVoice(channel).catch((err) => alert(err.message));
+  }
+
   function openPanel(kind, heading, body) {
+    if (kind !== 'events') eventsView = null;
     panelKind = kind;
     if (kind !== 'thread') {
       threadChat = null;
@@ -568,6 +679,8 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
   }
 
   function closePanel() {
+    const wasEvents = panelKind === 'events';
+    eventsView = null;
     panelKind = null;
     threadChat = null;
     threadRoot = null;
@@ -575,6 +688,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
     panel.replaceChildren();
     layout.classList.remove('has-panel');
     drawHeadActions();
+    if (wasEvents) drawChannels();
   }
 
   function panelEmpty(text) {
@@ -582,7 +696,8 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
   }
 
   function messageCard(message, { query, onUnpin } = {}) {
-    const text = message.content || (message.attachment ? `📎 ${message.attachment.filename}` : '');
+    const text = message.content
+      || (message.attachment ? `📎 ${message.attachment.filename}` : message.sticker ? `Стикер «${message.sticker.name}»` : '');
     return el('div', { class: 'panel-card' }, [
       el('button', { class: 'panel-item', type: 'button', onclick: () => jumpTo(message) }, [
         el('span', { class: 'panel-meta' }, [
@@ -735,11 +850,14 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
   }
 
   function memberRow(m) {
-    const online = presence.get(m.id);
+    const state = presenceFor(m.id);
+    const status = statusText(statusFor(m.id));
     return el('div', { class: 'member-row' }, [
-      avatar(m.name, online, m.avatar_url),
+      avatar(m.name, state, m.avatar_url),
       el('div', { class: 'member-main' }, [
         el('span', { class: 'member-name', text: m.id === me ? `${m.name} (вы)` : m.name }),
+        (status || state === 'dnd' || state === 'away') &&
+          el('span', { class: 'member-status', text: presenceLine(state, statusFor(m.id)) }),
         (m.role !== 'member' || m.tags.length > 0) &&
           el('span', { class: 'member-tags' }, [
             roleBadge(m.role, { small: true }),
@@ -820,6 +938,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
       permissions,
       members,
       tags,
+      emojis: emojiSet,
       decorateAuthor: direct ? null : decorateAuthor,
       thread: root,
       onRead: clearUnread,
@@ -858,7 +977,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
 
   async function openTextChannel(channel, { keepPanel = false } = {}) {
     activeChannel = channel;
-    if (!keepPanel && panelKind && panelKind !== 'members' && panelKind !== 'search') closePanel();
+    if (!keepPanel && panelKind && !['members', 'search', 'events'].includes(panelKind)) closePanel();
     drawChannels();
     drawHeadActions();
     const lastReadAt = unread.get(channel.id)?.last_read_at;
@@ -906,7 +1025,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
   async function refreshConversations() {
     try {
       ({ conversations } = await api('/direct'));
-      for (const c of conversations) presence.set(c.user.id, c.user.online);
+      for (const c of conversations) remember(c.user);
       if (activeConversation) {
         activeConversation = conversations.find((c) => c.id === activeConversation.id) ?? activeConversation;
       }
@@ -926,7 +1045,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
         // Тот же массив, а не новый: на него ссылаются чаты (упоминания).
         members.splice(0, members.length, ...data.members);
         if (data.tags) tags.splice(0, tags.length, ...data.tags);
-        for (const m of members) presence.set(m.id, m.online);
+        for (const m of members) remember(m);
       }
       presence.set(me, true);
       drawSubtitle();
@@ -967,7 +1086,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
       } else if (!message.thread_id) {
         conv.last_message = {
           from_me: mine,
-          text: message.content || (message.attachment ? 'вложение' : ''),
+          text: message.content || (message.sticker ? 'стикер' : message.attachment ? 'вложение' : ''),
           created_at: message.created_at,
         };
         if (!mine && !isActive) conv.unread += 1;
@@ -1005,13 +1124,16 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
     });
     const wanted = level === 'all' || (level === 'mentions' && (mentionsMe || message.is_direct));
     if (!wanted) return;
+    // «Не беспокоить» пропускает только личные сообщения.
+    if (isDoNotDisturb() && !message.is_direct) return;
     playChime('message');
     const where = message.is_direct
       ? message.author_name
       : `${message.author_name} · #${message.channel_name}`;
     showNotification({
       title: mentionsMe ? `${where} — вас упомянули` : where,
-      body: plainText(message.content) || (message.poll ? `Опрос: ${message.poll.question}` : 'вложение'),
+      body: plainText(message.content)
+        || (message.poll ? `Опрос: ${message.poll.question}` : message.sticker ? 'Стикер' : 'вложение'),
       icon: message.author_avatar_url,
       tag: message.channel_id,
       onClick: () => navigate(message.is_direct
@@ -1022,6 +1144,18 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
 
   function connect() {
     socket = io({ auth: { token: store.token } });
+    // 10 минут без мыши и клавиатуры — «отошёл»; вернулся — снова «в сети».
+    viewCleanup.push(watchIdle((idle) => socket?.emit('activity', { idle })));
+    // Плашка события сама переключается на «идёт сейчас» и гаснет после конца.
+    const eventClock = setInterval(() => {
+      if (upcomingEvents.some((e) => (Date.parse(e.starts_at) <= Date.now()) !== e.live
+        || Date.parse(e.effective_end) <= Date.now())) loadEvents();
+    }, 30_000);
+    viewCleanup.push(() => clearInterval(eventClock));
+    viewCleanup.push(onMyPresence(() => {
+      drawSubtitle();
+      if (panelKind === 'members') showMembers();
+    }));
     // Подписка на все свои сообщества: так счётчики непрочитанного на
     // соседних сообществах тоже живые. Личные сообщения приходят сами —
     // через личную комнату пользователя.
@@ -1070,9 +1204,11 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
       chat.onTypingEvent(payload);
       threadChat?.onTypingEvent(payload);
     });
-    socket.on('presence', ({ user_id: userId, online }) => {
-      presence.set(userId, online);
-      for (const c of conversations) if (c.user.id === userId) c.user.online = online;
+    socket.on('presence', ({ user_id: userId, online, presence: state, status }) => {
+      // Себя «в сети» считаем всегда — даже невидимкой.
+      if (userId !== me) presence.set(userId, online);
+      people.set(userId, { presence: state ?? (online ? 'online' : 'offline'), status: status ?? null });
+      for (const c of conversations) if (c.user.id === userId) Object.assign(c.user, { online, presence: state, status });
       if (direct) drawConversations();
       drawSubtitle();
       if (panelKind === 'members') showMembers();
@@ -1095,6 +1231,40 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
       if (index !== -1) members.splice(index, 1);
       if (panelKind === 'members') showMembers();
       drawSubtitle();
+    });
+    // Создали, поменяли или отменили событие, кто-то ответил, встреча началась.
+    socket.on('events_updated', ({ community_id: cid }) => {
+      if (cid !== community?.id) return;
+      loadEvents();
+      eventsView?.reload();
+    });
+    // Напоминание о встрече, на которую человек собирался.
+    socket.on('event_reminder', (payload) => {
+      showReminderToast(payload, {
+        onJoin: joinEvent,
+        onOpen: (p) => (p.community_id === community?.id ? showEvents() : navigate(`#/c/${p.community_id}`)),
+      });
+      if (isDoNotDisturb()) return;
+      playChime('message');
+      showNotification({
+        title: { soon: 'Скоро начнётся', start: 'Начинается', cancelled: 'Отменено' }[payload.kind] ?? 'Событие',
+        body: `${payload.title} · ${payload.community_name}`,
+        tag: `event:${payload.id}`,
+        onClick: () => navigate(`#/c/${payload.community_id}`),
+      });
+    });
+    // Модераторы добавили или убрали эмодзи и стикеры.
+    socket.on('emojis_updated', async ({ community_id: cid }) => {
+      if (cid !== community?.id) return;
+      try {
+        const data = await api(`/communities/${cid}/emojis`);
+        emojiSet.emojis = data.emojis;
+        emojiSet.stickers = data.stickers;
+        chat.redrawAll();
+        threadChat?.redrawAll();
+      } catch {
+        /* подтянется при следующем открытии */
+      }
     });
     socket.on('tags_updated', async ({ community_id: cid }) => {
       if (cid !== community?.id) return;
@@ -1138,6 +1308,8 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
         /* подтянется при следующем открытии */
       }
     });
+    // Свой режим и подпись поменяли в другой вкладке.
+    socket.on('my_presence', (mine) => setMyPresence(mine));
     // Служба платформы приняла решение по мне или ответила на обжалование.
     socket.on('standing_changed', () => {
       loadPlatform();
@@ -1199,6 +1371,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
   ]);
   mount(layout);
   connect();
+  loadEvents();
   if (!direct && can(permissions, 'handle_reports')) {
     api(`/communities/${community.id}/reports/count`)
       .then(({ open_count: openCount }) => {
@@ -1215,7 +1388,7 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
       try {
         ({ conversation: target } = await api(`/direct/${conversationId}`));
         conversations = [target, ...conversations];
-        presence.set(target.user.id, target.user.online);
+        remember(target.user);
         drawConversations();
       } catch {
         target = null;
@@ -1239,6 +1412,19 @@ async function renderWorkspace({ communityId = null, direct = false, conversatio
 function userZone() {
   const name = store.user?.display_name || store.user?.email || '';
   const zone = el('div', { class: 'user-zone' });
+  // Свой режим и подпись: точка на аватарке и строка под именем.
+  const statusDot = el('span', { class: 'status-dot' });
+  const statusLine = el('span', { class: 'user-status' });
+  const barAvatar = avatarNode(name, store.user?.avatar_url, 'user-avatar has-presence');
+  function drawStatus() {
+    const { mode, status } = myPresence();
+    statusDot.className = `status-dot is-${mode}`;
+    for (const state of ['online', 'away', 'dnd']) barAvatar.classList.toggle(`is-${state}`, mode === state);
+    statusLine.textContent = statusText(status) || PRESENCE_LABELS[mode];
+    statusLine.title = statusText(status) ? PRESENCE_LABELS[mode] : '';
+  }
+  drawStatus();
+  viewCleanup.push(onMyPresence(drawStatus));
 
   const menu = el('div', { class: 'user-menu' }, [
     el('div', { class: 'user-menu-head' }, [
@@ -1247,6 +1433,10 @@ function userZone() {
         el('span', { class: 'user-name', text: name }),
         el('span', { class: 'user-menu-mail', text: store.user?.email ?? '' }),
       ]),
+    ]),
+    el('button', { class: 'menu-item', type: 'button', onclick: () => (toggle(false), showStatusModal()) }, [
+      el('span', { class: 'menu-status-dot' }, [statusDot]),
+      'Статус',
     ]),
     el('button', { class: 'menu-item', type: 'button', onclick: () => navigate('#/settings') }, [
       icon('gear', 16),
@@ -1296,10 +1486,10 @@ function userZone() {
 
   zone.append(
     el('button', { class: 'user-bar', type: 'button', onclick: () => toggle() }, [
-      avatarNode(name, store.user?.avatar_url, 'user-avatar'),
+      barAvatar,
       el('div', { class: 'user-texts' }, [
         el('span', { class: 'user-name', text: name }),
-        el('span', { class: 'user-status', text: 'В сети' }),
+        statusLine,
       ]),
       caret,
     ]),

@@ -1,5 +1,6 @@
 // Оформление текста сообщений: **жирный**, *курсив*, ~~зачёркнутый~~,
-// `код`, блоки ```кода```, кликабельные ссылки и упоминания.
+// `код`, блоки ```кода```, кликабельные ссылки, упоминания и свои эмодзи
+// сообщества («:котик:»).
 //
 // Разметка собирается из DOM-узлов, текст вставляется только через
 // textContent — innerHTML не используется, поэтому «оформить» сообщение
@@ -8,6 +9,8 @@ import { el } from './dom.js';
 
 const LETTER_OR_DIGIT = '[\\p{L}\\p{N}]';
 const MAX_DEPTH = 3;
+const EMOJI_TOKEN = /:([\p{L}\p{N}_]{2,32}):/u;
+const ONLY_EMOJIS = /^(?:\s*:[\p{L}\p{N}_]{2,32}:\s*){1,5}$/u;
 
 function escapeRegExp(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -69,6 +72,17 @@ function rules(ctx) {
       render: (m, depth) => [el('em', {}, spans(m[2], ctx, depth + 1))],
     },
   ];
+  if (ctx.emojis?.size) {
+    list.push({
+      re: EMOJI_TOKEN,
+      render: (m) => {
+        const url = ctx.emojis.get(m[1].toLowerCase());
+        // Незнакомое имя (или эмодзи удалили) — остаётся текстом.
+        if (!url) return [m[0]];
+        return [el('img', { class: 'msg-emoji', src: url, alt: m[0], title: m[0], loading: 'lazy', decoding: 'async' })];
+      },
+    });
+  }
   if (ctx.tokens.length) {
     const alternatives = ctx.tokens.map((t) => escapeRegExp(t.token)).join('|');
     list.push({
@@ -115,9 +129,16 @@ function inline(text, ctx) {
   return out;
 }
 
+// Сообщение только из своих эмодзи (до пяти) показывается крупно.
+export function onlyEmojis(text, emojis) {
+  if (!emojis?.size || !ONLY_EMOJIS.test(text)) return false;
+  return [...text.matchAll(new RegExp(EMOJI_TOKEN, 'gu'))].every((m) => emojis.has(m[1].toLowerCase()));
+}
+
 // mentions — [{ token: '@Имя', className }]: упоминания людей и тегов.
-export function renderRich(text, { mentions = [] } = {}) {
-  const ctx = { tokens: [...mentions].sort((a, b) => b.token.length - a.token.length) };
+// emojis — Map «имя → ссылка на картинку»: свои эмодзи сообщества.
+export function renderRich(text, { mentions = [], emojis = null } = {}) {
+  const ctx = { tokens: [...mentions].sort((a, b) => b.token.length - a.token.length), emojis };
   const out = [];
   text.split(/```([\s\S]*?)```/).forEach((part, i) => {
     if (i % 2 === 1) {

@@ -8,9 +8,13 @@
 //
 // Входить — по почте из списка ниже; код покажется прямо на экране входа
 // (EXPOSE_DEV_CODE=true). Повторный запуск ничего не дублирует.
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { pool, waitForDatabase } from '../src/db.js';
 import { applySchema } from '../src/lib/schema.js';
 import { audit } from '../src/lib/platform.js';
+import { saveUpload } from '../src/routes/attachments.js';
 
 const PEOPLE = [
   ['super@test.ru', 'Суперадмин Сергей', 'superadmin'],
@@ -32,6 +36,8 @@ await applySchema();
 
 const existing = await one("SELECT id FROM users WHERE email = 'super@test.ru'");
 if (existing) {
+  // Основа уже есть — досыпаем только то, что появилось в новых версиях.
+  await seedCommunication();
   console.log('Демо-данные уже есть — можно входить. Почты: ' + PEOPLE.map(([e]) => e).join(', '));
   await pool.end();
   process.exit(0);
@@ -164,6 +170,7 @@ await audit(actor(moder), 'report_escalated', { targetType: 'community', targetI
 await audit(actor(admin), 'user_suspend', { targetType: 'user', targetId: vera.id, reason: 'Повторная реклама после предупреждения', details: { days: 7 } });
 await audit(actor(admin), 'community_frozen', { targetType: 'community', targetId: money.id, reason: 'Признаки финансовой пирамиды — до проверки' });
 
+await seedCommunication();
 await pool.end();
 console.log(`
 Демо-данные созданы. Вход — по почте, код покажется на экране входа.
@@ -175,6 +182,114 @@ console.log(`
   anna@test.ru    — Анна, владелец «Команды проекта»
   boris@test.ru   — Борис, модератор «Команды проекта»
   vera@test.ru    — Вера, заблокирована на неделю (может подать апелляцию)
-  petr@test.ru    — Пётр, заглушён на сутки
+  petr@test.ru    — Пётр, заглушён на сутки; при входе увидит окно предупреждения
   kirill@test.ru  — Кирилл, его сообщество «Быстрые деньги» заморожено, обжалование подано
 `);
+
+// ===== статусы, эмодзи и стикеры, события, предупреждение =====
+// Отдельной частью: на уже наполненной базе она досыпается при следующем
+// запуске, ничего не дублируя.
+async function seedCommunication() {
+  const team = await one("SELECT id FROM communities WHERE name = 'Команда проекта' ORDER BY created_at LIMIT 1");
+  if (!team) return;
+  const done = await one('SELECT 1 AS x FROM community_emojis WHERE community_id = $1 LIMIT 1', [team.id]);
+  if (done) return;
+  const byMail = async (email) => one('SELECT id FROM users WHERE email = $1', [email]);
+  const [annaU, borisU, petrU, moderU] = await Promise.all(
+    ['anna@test.ru', 'boris@test.ru', 'petr@test.ru', 'moder@test.ru'].map(byMail),
+  );
+  const text = await one("SELECT id FROM channels WHERE community_id = $1 AND type = 'text' ORDER BY created_at LIMIT 1", [team.id]);
+  const voiceCh = await one("SELECT id FROM channels WHERE community_id = $1 AND type = 'voice' ORDER BY created_at LIMIT 1", [team.id]);
+
+  // Статусы.
+  await q(`UPDATE users SET status_emoji = '🎨', status_text = 'рисую макет главной' WHERE id = $1`, [annaU.id]);
+  await q(`UPDATE users SET presence_mode = 'dnd', status_emoji = '🎧', status_text = 'в наушниках, пишите в личку' WHERE id = $1`, [borisU.id]);
+
+  // Эмодзи и стикеры — картинки лежат рядом, в demo-assets.
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'demo-assets');
+  const items = [
+    ['emoji', 'кот', 'emoji-cat.png'], ['emoji', 'огонь', 'emoji-fire.png'], ['emoji', 'лайк', 'emoji-like.png'],
+    ['emoji', 'ракета', 'emoji-rocket.png'], ['emoji', 'кофе', 'emoji-coffee.png'], ['emoji', 'ура', 'emoji-party.png'],
+    ['sticker', 'привет', 'sticker-hello.png'], ['sticker', 'спасибо', 'sticker-thanks.png'],
+    ['sticker', 'созвон', 'sticker-call.png'], ['sticker', 'красота', 'sticker-beauty.png'],
+  ];
+  const ids = {};
+  for (const [kind, name, file] of items) {
+    const buffer = await fs.readFile(path.join(dir, file));
+    const saved = await saveUpload({ buffer, mimeType: 'image/png', filename: file, uploaderId: annaU.id, communityId: team.id });
+    const row = await one(
+      'INSERT INTO community_emojis (community_id, kind, name, attachment_id, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+      [team.id, kind, name, saved.id, annaU.id],
+    );
+    ids[name] = row.id;
+  }
+
+  // Немного переписки со своими эмодзи, стикер и реакции.
+  const msg = (who, content, extra = {}) => one(
+    `INSERT INTO messages (channel_id, user_id, content, sticker_id, created_at)
+     VALUES ($1, $2, $3, $4, now() - make_interval(mins => $5)) RETURNING id`,
+    [text.id, who.id, content, extra.sticker ?? null, extra.ago ?? 20],
+  );
+  const m1 = await msg(annaU, 'Добавила наши эмодзи и стикеры :ура: Пишите :кот: или жмите на стикер рядом с полем ввода', { ago: 25 });
+  await msg(borisU, '', { sticker: ids['привет'], ago: 24 });
+  const m3 = await msg(borisU, 'Макет главной готов :огонь: :огонь:', { ago: 22 });
+  await msg(annaU, ':ракета:', { ago: 21 });
+  for (const [m, who, emoji] of [[m1, borisU, ':ура:'], [m1, petrU, ':кот:'], [m3, annaU, ':огонь:'], [m3, annaU, '👍']]) {
+    await q('INSERT INTO message_reactions (message_id, user_id, emoji) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [m.id, who.id, emoji]);
+  }
+
+  // События: сегодня созвон в голосовом (каждую неделю), завтра — встреча
+  // вне платформы, вчера — прошедший созвон с явкой.
+  const today = new Date();
+  today.setMinutes(0, 0, 0);
+  today.setHours(today.getHours() + 2);
+  const tomorrow = new Date(Date.now() + 86_400_000);
+  tomorrow.setHours(15, 0, 0, 0);
+  const event = (fields) => one(
+    `INSERT INTO community_events (community_id, series_id, title, description, starts_at, ends_at, channel_id, location_text, repeat_weekly, created_by, reminded_soon_at, reminded_start_at)
+     VALUES ($1, gen_random_uuid(), $2, $3, $4, $5, $6, $7, $8, $9, $10, $10) RETURNING id`,
+    [team.id, fields.title, fields.description ?? null, fields.starts, fields.ends, fields.channel ?? null,
+      fields.location ?? null, fields.weekly ?? false, annaU.id, fields.past ? new Date() : null],
+  );
+  const call = await event({
+    title: 'Созвон по макету', description: 'Смотрим главную и решаем, что берём в релиз.',
+    starts: today, ends: new Date(today.getTime() + 3_600_000), channel: voiceCh.id, weekly: true,
+  });
+  const demo = await event({
+    title: 'Демо для заказчика', description: 'Показываем прототип. Возьмите ноутбуки.',
+    starts: tomorrow, ends: new Date(tomorrow.getTime() + 5_400_000), location: 'Офис, переговорка 3',
+  });
+  const yesterday = new Date(today.getTime() - 86_400_000);
+  const past = await event({
+    title: 'Планёрка', starts: yesterday, ends: new Date(yesterday.getTime() + 3_600_000), channel: voiceCh.id, past: true,
+  });
+  const rsvp = (e, who, answer) => q('INSERT INTO event_rsvps (event_id, user_id, answer) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING', [e.id, who.id, answer]);
+  await rsvp(call, borisU, 'going');
+  await rsvp(call, petrU, 'maybe');
+  await rsvp(demo, borisU, 'going');
+  await rsvp(demo, moderU, 'no');
+  await rsvp(past, annaU, 'going');
+  await rsvp(past, borisU, 'going');
+  await rsvp(past, petrU, 'going');
+  // Вчера в звонок пришли Анна и Борис — Пётр обещал, но не пришёл.
+  const pastCall = await one(
+    'INSERT INTO calls (channel_id, started_at, ended_at) VALUES ($1, $2, $3) RETURNING id',
+    [voiceCh.id, yesterday, new Date(yesterday.getTime() + 3_000_000)],
+  );
+  for (const [who, from, to] of [[annaU, 2, 50], [borisU, 5, 45]]) {
+    await q(
+      'INSERT INTO call_participants (call_id, user_id, joined_at, left_at, duration_sec) VALUES ($1, $2, $3, $4, $5)',
+      [pastCall.id, who.id, new Date(yesterday.getTime() + from * 60_000), new Date(yesterday.getTime() + to * 60_000), (to - from) * 60],
+    );
+  }
+
+  // Предупреждение Петру — при входе он увидит окно предупреждения.
+  const rude = await one(
+    "SELECT id FROM messages WHERE channel_id = $1 AND content LIKE 'Борис, ты вообще молчи%' LIMIT 1", [text.id],
+  );
+  await q(
+    `INSERT INTO platform_sanctions (user_id, kind, message_id, community_id, reason, issued_by, issued_by_role)
+     VALUES ($1, 'warning', $2, $3, 'Грубость в адрес участника в общем чате (правила платформы, п. 3)', $4, 'moderator')`,
+    [petrU.id, rude?.id ?? null, team.id, moderU.id],
+  );
+}

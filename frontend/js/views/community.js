@@ -4,7 +4,7 @@
 // создаёт каналы, ведёт теги и исключает участников, владелец —
 // назначает модераторов и переименовывает сообщество. Права проверяет
 // сервер, интерфейс лишь не показывает лишнего.
-import { api } from '../api.js';
+import { api, uploadFile } from '../api.js';
 import { el, mount, icon, showModal } from '../dom.js';
 import { platformReportForm } from '../platform.js';
 import { avatarNode, pickAndUploadAvatar } from '../avatar.js';
@@ -30,6 +30,8 @@ const ROLE_ABILITIES = [
   ['Создавать теги и выставлять их участникам', false, true, true],
   ['Исключать и банить участников (кроме модераторов и владельца)', false, true, true],
   ['Разбирать жалобы на сообщения', false, true, true],
+  ['Загружать и удалять свои эмодзи и стикеры', false, true, true],
+  ['Создавать, менять и отменять события', false, true, true],
   ['Назначать и снимать модераторов', false, false, true],
   ['Переименовывать сообщество и менять его аватарку', false, false, true],
   ['Смотреть аналитику', false, false, true],
@@ -718,6 +720,80 @@ export async function renderCommunity(communityId) {
   loadBans();
 
   // ===== уход из сообщества =====
+  // ===== свои эмодзи и стикеры =====
+  // Видят все участники; загружают и удаляют владелец и модераторы.
+  const canManageEmojis = can(permissions, 'manage_emojis');
+  const emojiSection = el('section', { class: 'settings-section' });
+  const emojiNote = el('p', { class: 'saved-note' });
+  const EMOJI_KINDS = { emoji: 'Эмодзи', sticker: 'Стикер' };
+  const emojiKind = el('select', { class: 'select', id: 'emoji-kind' },
+    Object.entries(EMOJI_KINDS).map(([value, text]) => el('option', { value, text })));
+  const emojiName = el('input', { class: 'input', id: 'emoji-name', type: 'text', maxlength: '32', placeholder: 'например, котик' });
+  const emojiFile = el('input', { class: 'input', id: 'emoji-file', type: 'file', accept: 'image/png,image/jpeg,image/gif,image/webp' });
+
+  async function drawEmojis() {
+    let data;
+    try {
+      data = await api(`/communities/${communityId}/emojis`);
+    } catch (err) {
+      emojiSection.replaceChildren(el('p', { class: 'field-error', text: err.message }));
+      return;
+    }
+    const item = (e) => el('div', { class: 'emoji-admin-item' }, [
+      el('img', { src: e.url, alt: e.name, loading: 'lazy' }),
+      el('span', { text: e.kind === 'emoji' ? `:${e.name}:` : e.name, title: e.created_by_name ? `Добавил(а): ${e.created_by_name}` : '' }),
+      canManageEmojis && confirmingButton({
+        label: 'Удалить',
+        confirmLabel: 'Точно?',
+        className: 'btn btn-ghost btn-sm',
+        onConfirm: async () => {
+          try {
+            await api(`/communities/${communityId}/emojis/${e.id}`, { method: 'DELETE' });
+            drawEmojis();
+          } catch (err) {
+            emojiNote.className = 'field-error';
+            emojiNote.textContent = err.message;
+          }
+        },
+      }),
+    ]);
+    const { limits } = data;
+    emojiSection.replaceChildren(...[
+      el('p', { class: 'settings-kicker', text: `Эмодзи · ${data.emojis.length} из ${limits.emoji.max}` }),
+      data.emojis.length
+        ? el('div', { class: 'emoji-admin-grid' }, data.emojis.map(item))
+        : el('p', { class: 'row-note', text: 'Своих эмодзи пока нет. В сообщениях и реакциях их пишут как :имя:.' }),
+      el('p', { class: 'settings-kicker', text: `Стикеры · ${data.stickers.length} из ${limits.sticker.max}` }),
+      data.stickers.length
+        ? el('div', { class: 'emoji-admin-grid' }, data.stickers.map(item))
+        : el('p', { class: 'row-note', text: 'Стикеров пока нет. Их отправляют кнопкой со стикером рядом с полем ввода.' }),
+    ].filter(Boolean));
+  }
+  drawEmojis();
+
+  async function uploadEmoji() {
+    const file = emojiFile.files[0];
+    const name = emojiName.value.trim().toLowerCase();
+    emojiNote.className = 'field-error';
+    if (!name) return (emojiNote.textContent = 'Придумайте имя');
+    if (!/^[\p{L}\p{N}_]{2,32}$/u.test(name)) return (emojiNote.textContent = 'Имя — от 2 до 32 букв, цифр или «_», без пробелов');
+    if (!file) return (emojiNote.textContent = 'Выберите картинку');
+    const maxKb = emojiKind.value === 'emoji' ? 256 : 512;
+    if (file.size > maxKb * 1024) return (emojiNote.textContent = `Картинка больше ${maxKb} КБ`);
+    emojiNote.className = 'saved-note';
+    emojiNote.textContent = 'Загружаем…';
+    try {
+      await uploadFile(`/communities/${communityId}/emojis?kind=${emojiKind.value}&name=${encodeURIComponent(name)}`, file);
+      emojiNote.textContent = `${EMOJI_KINDS[emojiKind.value]} «${name}» добавлен`;
+      emojiName.value = '';
+      emojiFile.value = '';
+      drawEmojis();
+    } catch (err) {
+      emojiNote.className = 'field-error';
+      emojiNote.textContent = err.message;
+    }
+  }
+
   const leaveNote = el('p', { class: 'field-error' });
 
   async function leaveCommunity(button) {
@@ -922,6 +998,19 @@ export async function renderCommunity(communityId) {
             ]),
 
           notifySection,
+
+          emojiSection,
+          canManageEmojis &&
+            el('form', { class: 'settings-section', onsubmit: (e) => (e.preventDefault(), uploadEmoji()) }, [
+              el('p', { class: 'row-note', text: 'PNG, JPEG, WebP или GIF (можно анимированный). Эмодзи — до 256 КБ, стикер — до 512 КБ. Лучше квадратная картинка.' }),
+              el('div', { class: 'emoji-upload-row' }, [
+                el('div', { class: 'field' }, [el('label', { class: 'field-label', for: 'emoji-kind', text: 'Что добавить' }), emojiKind]),
+                el('div', { class: 'field' }, [el('label', { class: 'field-label', for: 'emoji-name', text: 'Имя' }), emojiName]),
+                el('div', { class: 'field' }, [el('label', { class: 'field-label', for: 'emoji-file', text: 'Картинка' }), emojiFile]),
+                el('button', { class: 'btn btn-secondary', type: 'submit', text: 'Добавить' }),
+              ]),
+              emojiNote,
+            ]),
 
           membersKicker,
           membersSection,

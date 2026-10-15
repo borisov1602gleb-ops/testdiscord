@@ -99,6 +99,12 @@ export function unseenNotices() {
     !s.seen || (s.appeal && s.appeal.status !== 'pending' && !s.appeal.response_seen));
 }
 
+// Новое предупреждение показывается отдельным окном сверху (warningCard),
+// а не строкой в полосе уведомлений.
+function isFreshWarning(s) {
+  return s.kind === 'warning' && !s.seen;
+}
+
 export async function markSeen(ids) {
   if (!ids.length) return;
   await api('/platform/me/seen', { method: 'POST', body: { sanction_ids: ids } }).catch(() => {});
@@ -126,7 +132,7 @@ export function noticeBar() {
       return;
     }
     if (node.isConnected) seenMounted = true;
-    const items = unseenNotices();
+    const items = unseenNotices().filter((s) => !isFreshWarning(s));
     node.hidden = items.length === 0;
     node.replaceChildren(...items.slice(0, 3).map((s) => el('div', { class: `platform-notice is-${s.kind}` }, [
       icon(s.kind === 'warning' ? 'alert' : 'shield', 16),
@@ -145,6 +151,99 @@ export function noticeBar() {
   const off = onPlatformChange(draw);
   draw();
   return node;
+}
+
+// ===== окно предупреждения =====
+// Карточка сверху по центру экрана — по макету: значок, «Предупреждение
+// от модератора платформы», какое оно по счёту, где было нарушение,
+// причина и кнопки. «Понятно» отмечает просмотренным; крестик прячет до
+// перезагрузки страницы.
+const ISSUER_LABELS = {
+  moderator: 'модератора платформы',
+  admin: 'администратора платформы',
+  superadmin: 'администрации платформы',
+};
+const hiddenWarnings = new Set();
+
+function ordinal(n) {
+  return `${n}-е`;
+}
+
+export function warningCard() {
+  const host = el('div', { class: 'warning-host' });
+  let mounted = false;
+  function draw() {
+    if (mounted && !host.isConnected) {
+      off();
+      return;
+    }
+    if (host.isConnected) mounted = true;
+    const items = unseenNotices().filter((s) => isFreshWarning(s) && !hiddenWarnings.has(s.id));
+    // Старые сначала: человек читает их по порядку.
+    const s = items.at(-1);
+    if (!s) {
+      host.replaceChildren();
+      return;
+    }
+    if (host.firstChild?.dataset.id === s.id) return;
+    const n = s.warning_number ?? 1;
+    const where = s.community
+      ? `Сообщество «${s.community.name}»${s.channel ? ` · канал #${s.channel.name}` : ''}`
+      : s.in_direct ? 'Личная переписка' : 'Платформа целиком';
+    const next = n >= 2
+      ? 'Это уже не первое предупреждение. При новых нарушениях служба платформы может ограничить отправку сообщений или заблокировать аккаунт.'
+      : 'Предупреждение ничего не ограничивает. При повторных нарушениях служба платформы может ограничить отправку сообщений или заблокировать аккаунт.';
+    const card = el('div', { class: 'warning-card', role: 'alert', 'data-id': s.id }, [
+      el('div', { class: 'warning-stripe' }),
+      el('div', { class: 'warning-body' }, [
+        el('span', { class: 'warning-icon' }, [icon('warning', 24)]),
+        el('div', { class: 'warning-main' }, [
+          el('div', { class: 'warning-title-row' }, [
+            el('span', { class: 'warning-title', text: `Предупреждение от ${ISSUER_LABELS[s.issued_by_role] ?? 'службы платформы'}` }),
+            el('span', {
+              class: 'warning-count',
+              text: `${ordinal(n)} за ${s.warning_window_days ?? 90} дней`,
+              title: 'Сколько предупреждений у вас за этот срок, включая это',
+            }),
+          ]),
+          el('p', { class: 'warning-where', text: `${where} · ${formatDateTime(s.created_at)}` }),
+          el('div', { class: 'warning-reason' }, [
+            el('span', { class: 'warning-reason-label', text: 'Причина' }),
+            el('span', { class: 'warning-reason-text', text: s.reason }),
+          ]),
+          el('p', { class: 'warning-next', text: next }),
+          el('div', { class: 'warning-actions' }, [
+            el('button', {
+              class: 'warning-ok',
+              type: 'button',
+              text: 'Понятно',
+              onclick: async (e) => {
+                e.currentTarget.disabled = true;
+                card.classList.add('is-leaving');
+                await markSeen([s.id]);
+              },
+            }),
+            s.can_appeal && el('a', { class: 'warning-link', href: '#/standing' }, [icon('scales', 16), 'Обжаловать']),
+            items.length > 1 && el('span', { class: 'warning-more', text: `и ещё ${items.length - 1}` }),
+          ]),
+        ]),
+        el('button', {
+          class: 'warning-close',
+          type: 'button',
+          'aria-label': 'Скрыть до перезагрузки',
+          title: 'Скрыть до перезагрузки',
+          onclick: () => {
+            hiddenWarnings.add(s.id);
+            draw();
+          },
+        }, [icon('close', 16)]),
+      ]),
+    ]);
+    host.replaceChildren(card);
+  }
+  const off = onPlatformChange(draw);
+  draw();
+  return host;
 }
 
 // ===== жалоба в службу платформы =====

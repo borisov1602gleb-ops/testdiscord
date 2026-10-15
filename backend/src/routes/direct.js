@@ -8,8 +8,8 @@ import { requireAuth } from '../middleware/auth.js';
 import { requireNotMuted } from '../lib/platform.js';
 import { getChannel, requireChannelAccess } from '../lib/access.js';
 import { parseUuid } from '../lib/validate.js';
-import { isOnline } from '../lib/realtime.js';
-import { PUBLIC_NAME_SQL } from '../lib/users.js';
+import { presenceOf } from '../lib/realtime.js';
+import { PUBLIC_NAME_SQL, statusSql, describeStatus } from '../lib/users.js';
 import { avatarUrl } from '../lib/signed-urls.js';
 
 export const directRouter = Router();
@@ -23,9 +23,10 @@ async function listConversations(userId, channelId = null) {
   const { rows } = await query(
     `SELECT ch.id, ch.created_at,
             other.user_id AS other_id, ${PUBLIC_NAME_SQL} AS other_name, u.avatar_id AS other_avatar_id,
+            ${statusSql('u')},
             last.content AS last_content, last.created_at AS last_at,
             last.user_id AS last_user_id, last.deleted_at IS NOT NULL AS last_deleted,
-            last.has_attachment AS last_has_attachment,
+            last.has_attachment AS last_has_attachment, last.is_sticker AS last_is_sticker,
             COALESCE(cr.last_read_at, mine.joined_at) AS last_read_at,
             (SELECT count(*)::int FROM messages m
              WHERE m.channel_id = ch.id AND m.user_id <> $1 AND m.deleted_at IS NULL
@@ -38,7 +39,7 @@ async function listConversations(userId, channelId = null) {
      LEFT JOIN channel_reads cr ON cr.channel_id = ch.id AND cr.user_id = mine.user_id
      LEFT JOIN LATERAL (
        SELECT m.content, m.created_at, m.user_id, m.deleted_at,
-              m.attachment_id IS NOT NULL AS has_attachment
+              m.attachment_id IS NOT NULL AS has_attachment, m.sticker_id IS NOT NULL AS is_sticker
        FROM messages m WHERE m.channel_id = ch.id AND m.thread_id IS NULL
        ORDER BY m.created_at DESC, m.id DESC LIMIT 1
      ) last ON true
@@ -52,14 +53,16 @@ async function listConversations(userId, channelId = null) {
       id: row.other_id,
       name: row.other_name,
       avatar_url: avatarUrl(row.other_avatar_id),
-      online: isOnline(row.other_id),
+      online: presenceOf(row.other_id) !== 'offline',
+      presence: presenceOf(row.other_id),
+      status: describeStatus(row),
     },
     last_message: row.last_at
       ? {
         from_me: row.last_user_id === userId,
         text: row.last_deleted
           ? 'сообщение удалено'
-          : (row.last_content || (row.last_has_attachment ? 'вложение' : '')).slice(0, SNIPPET_LENGTH),
+          : (row.last_content || (row.last_has_attachment ? 'вложение' : row.last_is_sticker ? 'стикер' : '')).slice(0, SNIPPET_LENGTH),
         created_at: row.last_at,
       }
       : null,

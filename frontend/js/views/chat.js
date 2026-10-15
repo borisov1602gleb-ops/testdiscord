@@ -7,12 +7,14 @@
 import { api, uploadFile } from '../api.js';
 import { store } from '../store.js';
 import { el, formatTime, icon, initial } from '../dom.js';
-import { renderRich, firstLink, safeHref } from '../rich-text.js';
+import { renderRich, firstLink, safeHref, onlyEmojis } from '../rich-text.js';
 import { avatarNode } from '../avatar.js';
 import { platformReportForm } from '../platform.js';
 
-// Тот же набор, что на сервере: другие реакции он не примет.
+// Тот же набор, что на сервере: другие реакции он не примет. В сообществе
+// к ним добавляются его свои эмодзи («:имя:»).
 const REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🔥'];
+const CUSTOM_REACTION = /^:([\p{L}\p{N}_]{2,32}):$/u;
 const PAGE_SIZE = 50;
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const FILE_TYPES = [
@@ -88,6 +90,8 @@ function hasToken(text, token) {
 //  permissions — права в сообществе: удалять чужое, закреплять;
 //  members   — кого можно упомянуть;
 //  tags      — теги сообщества: их тоже можно упомянуть («@Дизайнер»);
+//  emojis    — свои эмодзи и стикеры сообщества { emojis: [], stickers: [] };
+//              экран меняет содержимое, а не ссылку;
 //  thread    — корневое сообщение, если это чат треда;
 //  decorateAuthor — что показать рядом с именем автора (роль, теги);
 //  onRead, onOpenThread, onAuthorClick, onTyping — связи с экраном.
@@ -97,6 +101,7 @@ export function createChat({
   decorateAuthor,
   members = [],
   tags = [],
+  emojis = { emojis: [], stickers: [] },
   thread = null,
   onRead,
   onOpenThread,
@@ -135,6 +140,10 @@ export function createChat({
   const items = new Map(); // id → { message, node, options }
 
   const canPin = () => channel?.type === 'direct' || permissions.includes('pin_messages');
+  // Свои эмодзи работают только в каналах сообщества, не в личке.
+  const emojiMap = () => (channel && channel.type !== 'direct'
+    ? new Map(emojis.emojis.map((e) => [e.name.toLowerCase(), e.url]))
+    : null);
 
   // ===== лента =====
 
@@ -396,12 +405,20 @@ export function createChat({
           class: `reaction${r.user_ids.includes(me) ? ' is-mine' : ''}`,
           type: 'button',
           title: r.user_ids.includes(me) ? 'Убрать реакцию' : 'Поставить такую же',
-          text: `${r.emoji} ${r.count}`,
+          'aria-label': `${r.emoji} ${r.count}`,
           disabled: readOnly ? 'true' : null,
           onclick: () => toggleReaction(message.id, r.emoji),
-        }),
+        }, reactionFace(r.emoji, r.count)),
       ),
     );
+  }
+
+  // Реакция своим эмодзи — картинка; если эмодзи удалили — текст «:имя:».
+  function reactionFace(emoji, count) {
+    const custom = CUSTOM_REACTION.exec(emoji);
+    const url = custom && emojiMap()?.get(custom[1].toLowerCase());
+    if (!url) return [`${emoji} ${count}`];
+    return [el('img', { class: 'reaction-emoji', src: url, alt: emoji }), ` ${count}`];
   }
 
   // Отметка под своим сообщением — как в Telegram: одна галочка —
@@ -456,7 +473,7 @@ export function createChat({
     if (!isThread && !message.thread_id && canPin()) {
       bar.append(tool(message.pinned ? 'Открепить' : 'Закрепить', 'pin', () => togglePin(message)));
     }
-    if (own && !message.poll) bar.append(tool('Изменить', 'pencil', () => startEdit(message)));
+    if (own && !message.poll && !message.sticker) bar.append(tool('Изменить', 'pencil', () => startEdit(message)));
     // Пожаловаться на чужое сообщение: модераторам сообщества или в службу
     // платформы; в личке — только в службу платформы.
     if (!own) {
@@ -521,9 +538,17 @@ export function createChat({
       }));
     } else {
       if (message.content) {
-        body.append(el('div', { class: 'msg-text' }, renderRich(message.content, { mentions: mentionTokens(message) })));
+        const map = emojiMap();
+        body.append(el('div', {
+          class: `msg-text${onlyEmojis(message.content, map) ? ' msg-jumbo' : ''}`,
+        }, renderRich(message.content, { mentions: mentionTokens(message), emojis: map })));
         const link = firstLink(message.content);
         if (link) body.append(linkPreview(link));
+      }
+      if (message.sticker) {
+        body.append(message.sticker.url
+          ? el('img', { class: 'msg-sticker', src: message.sticker.url, alt: `Стикер «${message.sticker.name}»`, title: message.sticker.name, loading: 'lazy' })
+          : el('p', { class: 'msg-text msg-gone', text: 'Стикер удалён' }));
       }
       if (message.poll) body.append(pollView(message));
       if (message.attachment) body.append(attachmentView(message.attachment));
@@ -596,7 +621,9 @@ export function createChat({
     if (!channel) return;
     const blocked = writeBlock();
     const canWrite = !blocked && (!channel.read_only || permissions.includes('post_read_only'));
-    for (const control of [input, sendButton, attachButton, micButton, pollButton]) control.disabled = !canWrite;
+    for (const control of [input, sendButton, attachButton, micButton, pollButton, stickerButton]) control.disabled = !canWrite;
+    // В личке своих стикеров нет.
+    stickerButton.hidden = channel.type === 'direct';
     composer.classList.toggle('is-readonly', !canWrite);
     if (basePlaceholder) input.placeholder = blocked ?? basePlaceholder;
   }
@@ -871,6 +898,7 @@ export function createChat({
   }
 
   function showReactionPicker(message, anchor) {
+    const own = channel?.type !== 'direct' ? emojis.emojis : [];
     showPopover(anchor, [
       el(
         'div',
@@ -884,8 +912,47 @@ export function createChat({
           }),
         ),
       ),
+      own.length > 0 && el(
+        'div',
+        { class: 'reaction-picker reaction-picker-custom' },
+        own.map((e) =>
+          el('button', {
+            class: 'reaction-pick',
+            type: 'button',
+            title: `:${e.name}:`,
+            onclick: () => toggleReaction(message.id, `:${e.name}:`),
+          }, [el('img', { class: 'reaction-emoji', src: e.url, alt: `:${e.name}:` })]),
+        ),
+      ),
     ]);
     openPopover.classList.add('popover-tools');
+  }
+
+  // Стикеры сообщества: сетка картинок, нажатие отправляет.
+  function showStickerPicker() {
+    if (!channel || channel.type === 'direct') return;
+    const list = emojis.stickers;
+    closePopover();
+    openPopover = el('div', { class: 'popover sticker-picker' }, [
+      el('p', { class: 'readers-title', text: 'Стикеры сообщества' }),
+      list.length
+        ? el('div', { class: 'sticker-grid' }, list.map((st) => el('button', {
+          class: 'sticker-pick',
+          type: 'button',
+          title: st.name,
+          onclick: async () => {
+            closePopover();
+            try {
+              await postExtra({ sticker_id: st.id });
+            } catch (err) {
+              showError(err.message);
+            }
+          },
+        }, [el('img', { src: st.url, alt: st.name, loading: 'lazy' })])))
+        : el('p', { class: 'readers-empty', text: 'Стикеров пока нет. Владелец и модераторы добавляют их в настройках сообщества.' }),
+    ]);
+    composer.append(openPopover);
+    setTimeout(() => document.addEventListener('click', onOutsideClick), 0);
   }
 
   async function showReaders(message, anchor) {
@@ -931,6 +998,11 @@ export function createChat({
     'button',
     { class: 'composer-icon', type: 'button', title: 'Создать опрос', 'aria-label': 'Создать опрос', disabled: 'true' },
     [icon('poll', 16)],
+  );
+  const stickerButton = el(
+    'button',
+    { class: 'composer-icon', type: 'button', title: 'Стикеры', 'aria-label': 'Стикеры', disabled: 'true' },
+    [icon('sticker', 18)],
   );
   const recordTime = el('span', { class: 'record-time', text: '0:00' });
   const recordBar = el('div', { class: 'record-bar' }, [
@@ -1051,6 +1123,28 @@ export function createChat({
   // имя содержит набранное. Тег упоминает всех, у кого он есть.
   function updateSuggestions() {
     const before = input.value.slice(0, input.selectionStart);
+    // «:кот» — подсказка своих эмодзи сообщества.
+    const emojiMatch = channel?.type !== 'direct' && before.match(/(^|\s):([\p{L}\p{N}_]{1,32})$/u);
+    if (emojiMatch && emojis.emojis.length) {
+      const typed = emojiMatch[2].toLowerCase();
+      suggestions = emojis.emojis
+        .filter((e) => e.name.toLowerCase().includes(typed))
+        .map((e) => ({ name: e.name, emoji: e }))
+        .slice(0, 8);
+      if (suggestions.length === 0) return hideSuggestions();
+      suggestIndex = Math.min(suggestIndex, suggestions.length - 1);
+      suggestBox.replaceChildren(...suggestions.map((sug, i) => el('button', {
+        class: `mention-option${i === suggestIndex ? ' is-active' : ''}`,
+        type: 'button',
+        role: 'option',
+        onmousedown: (e) => (e.preventDefault(), chooseSuggestion(sug)),
+      }, [
+        el('img', { class: 'reaction-emoji', src: sug.emoji.url, alt: '' }),
+        el('span', { text: `:${sug.name}:` }),
+      ])));
+      suggestBox.hidden = false;
+      return;
+    }
     const match = before.match(/(^|\s)@([^\s@]*)$/);
     if (!match) return hideSuggestions();
     const typed = match[2].toLowerCase();
@@ -1099,7 +1193,9 @@ export function createChat({
 
   function chooseSuggestion(member) {
     const caret = input.selectionStart;
-    const before = input.value.slice(0, caret).replace(/@([^\s@]*)$/, `@${member.name} `);
+    const before = member.emoji
+      ? input.value.slice(0, caret).replace(/:([\p{L}\p{N}_]*)$/u, `:${member.name}: `)
+      : input.value.slice(0, caret).replace(/@([^\s@]*)$/, `@${member.name} `);
     input.value = before + input.value.slice(caret);
     input.setSelectionRange(before.length, before.length);
     hideSuggestions();
@@ -1368,6 +1464,11 @@ export function createChat({
   }
 
   micButton.addEventListener('click', startRecording);
+  stickerButton.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (openPopover?.classList.contains('sticker-picker')) closePopover();
+    else showStickerPicker();
+  });
   pollButton.addEventListener('click', showPollDialog);
 
   // ===== жалобы =====
@@ -1470,6 +1571,7 @@ export function createChat({
     pollButton,
     fileInput,
     input,
+    stickerButton,
     micButton,
     sendButton,
   ]);

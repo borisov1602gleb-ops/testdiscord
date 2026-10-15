@@ -29,6 +29,9 @@ import { moderationRouter } from './routes/moderation.js';
 import { pollsRouter } from './routes/polls.js';
 import { previewsRouter } from './routes/previews.js';
 import { platformRouter } from './routes/platform.js';
+import { emojisRouter } from './routes/emojis.js';
+import { eventsRouter } from './routes/events.js';
+import { startEventSweeper } from './lib/event-sweeper.js';
 
 export const app = express();
 // На этапе MVP клиент и API живут на одном адресе, поэтому cors() открыт
@@ -62,6 +65,8 @@ app.use('/users', usersRouter);
 app.use('/communities', analyticsRouter);
 app.use('/communities', communitiesRouter);
 app.use('/communities', moderationRouter);
+app.use('/communities', emojisRouter);
+app.use('/communities', eventsRouter);
 app.use('/invites', invitesRouter);
 app.use('/calls', callsRouter);
 app.use('/messages', messagesRouter);
@@ -89,6 +94,7 @@ server.listen(config.port, () => {
   startEtlScheduler();
   startCallSweeper();
   startPlatformSweeper();
+  startEventSweeper();
 });
 
 for (const signal of ['SIGTERM', 'SIGINT']) {
