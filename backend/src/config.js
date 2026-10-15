@@ -27,6 +27,10 @@ export const config = {
     staleSec: Number(process.env.CALL_STALE_SEC ?? 30),
     sweepSec: Number(process.env.CALL_SWEEP_SEC ?? 10),
   },
+  events: {
+    // Как часто проверять, кому пора напомнить о событии. 0 выключает.
+    sweepSec: Number(process.env.EVENT_SWEEP_SEC ?? 30),
+  },
   etl: {
     // Как часто пересобираются аналитические слои. 0 выключает
     // автозапуск — тогда остаётся ручной `npm run etl` и кнопка

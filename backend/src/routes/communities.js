@@ -11,11 +11,11 @@ import {
 } from '../lib/access.js';
 import { parseUuid } from '../lib/validate.js';
 import { requireNotMuted, getSetting, activeInspection } from '../lib/platform.js';
-import { PUBLIC_NAME_SQL, publicNameSql } from '../lib/users.js';
+import { PUBLIC_NAME_SQL, publicNameSql, statusSql, describeStatus } from '../lib/users.js';
 import { avatarUrl } from '../lib/signed-urls.js';
 import { rawBody, contentTypeOf, saveUpload, IMAGE_TYPES } from './attachments.js';
 import {
-  evictFromCommunity, isOnline, emitToCommunity, emitToUser, resetChannelRooms,
+  evictFromCommunity, presenceOf, emitToCommunity, emitToUser, resetChannelRooms,
 } from '../lib/realtime.js';
 
 export const communitiesRouter = Router();
@@ -57,7 +57,7 @@ async function listTags(communityId) {
 // Участник так, как его видят остальные: имя, роль, теги, в сети ли.
 async function listMembers(communityId, userId = null) {
   const { rows } = await query(
-    `SELECT u.id, ${PUBLIC_NAME_SQL} AS name, m.role, m.joined_at, u.avatar_id,
+    `SELECT u.id, ${PUBLIC_NAME_SQL} AS name, m.role, m.joined_at, u.avatar_id, ${statusSql('u')},
             COALESCE(
               (SELECT json_agg(json_build_object('id', t.id, 'name', t.name, 'color', t.color)
                                ORDER BY t.created_at)
@@ -71,12 +71,20 @@ async function listMembers(communityId, userId = null) {
      ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'moderator' THEN 1 ELSE 2 END, m.joined_at`,
     [communityId, userId],
   );
-  // «В сети» — есть хотя бы одно открытое соединение по WebSocket.
-  return rows.map(({ avatar_id: avatarId, ...m }) => ({
-    ...m,
-    avatar_url: avatarUrl(avatarId),
-    online: isOnline(m.id),
-  }));
+  // «В сети» — есть хотя бы одно открытое соединение по WebSocket и
+  // человек не выбрал режим «невидимка».
+  return rows.map(({
+    avatar_id: avatarId, status_text: _t, status_emoji: _e, status_expires_at: _x, ...m
+  }) => {
+    const presence = presenceOf(m.id);
+    return {
+      ...m,
+      avatar_url: avatarUrl(avatarId),
+      online: presence !== 'offline',
+      presence,
+      status: describeStatus({ status_text: _t, status_emoji: _e, status_expires_at: _x }),
+    };
+  });
 }
 
 // У человека поменялись роль или теги — поменялся и список закрытых

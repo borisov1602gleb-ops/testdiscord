@@ -42,6 +42,9 @@ jobs:
       EXPOSE_DEV_CODE: 'true'
       # Витрины в тестах пересобираются явно, расписание тут только мешало бы.
       ETL_INTERVAL_SEC: '0'
+      # Напоминания о событиях проверяются раз в 2 секунды, а не в 30:
+      # тест ждёт их по-настоящему.
+      EVENT_SWEEP_SEC: '2'
       PGHOST: localhost
       PGUSER: postgres
       PGPASSWORD: postgres
@@ -97,6 +100,10 @@ jobs:
       - name: Служба платформы — роли, меры, обжалования, журнал
         working-directory: backend
         run: node scripts/platform-test.mjs
+
+      - name: Статусы, эмодзи и стикеры, события, предупреждения
+        working-directory: backend
+        run: node scripts/community-features-test.mjs
 
       - name: Превью ссылок — защита от запросов во внутреннюю сеть
         working-directory: backend

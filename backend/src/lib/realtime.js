@@ -11,26 +11,46 @@
 //
 // Здесь же — кто в сети и кто печатает. Оба знания живут только в памяти
 // процесса: при нескольких копиях backend понадобится общий брокер (Redis).
+//
+// Присутствие для остальных — одно из четырёх: online, away («отошёл»:
+// выбрал сам или все его вкладки 10 минут без активности), dnd («не
+// беспокоить») и offline (нет вкладок или выбран режим «невидимка»).
 import { Server } from 'socket.io';
 import { query } from '../db.js';
 import { verifyToken } from '../middleware/auth.js';
 import {
   requireMembership, getChannel, requireChannelAccess, isChatChannel, usersWithAccess,
 } from './access.js';
-import { getProfile } from './users.js';
+import { getProfile, getStatus } from './users.js';
 import { verifyBoardToken } from './boards.js';
 import { getStanding } from './platform.js';
 import { registerBoardHandlers } from './board-socket.js';
 
 let io = null;
-// user_id → сколько у человека открыто соединений (вкладок).
+// user_id → Map(socket.id → бездействует ли вкладка).
 const onlineSockets = new Map();
+// user_id → выбранный режим (online, away, dnd, invisible). Читается из
+// базы при подключении и меняется вместе с настройкой.
+const presenceModes = new Map();
+// Что последним разослали о человеке — чтобы не слать одно и то же.
+const lastPresence = new Map();
+export const PRESENCE_MODES = ['online', 'away', 'dnd', 'invisible'];
 // Не чаще раза в пару секунд на канал: иначе каждое нажатие клавиши
 // превращалось бы в рассылку всем.
 const TYPING_THROTTLE_MS = 2000;
 
+// Каким человек виден другим прямо сейчас.
+export function presenceOf(userId) {
+  const sockets = onlineSockets.get(userId);
+  if (!sockets || sockets.size === 0) return 'offline';
+  const mode = presenceModes.get(userId) ?? 'online';
+  if (mode === 'invisible') return 'offline';
+  if (mode === 'dnd' || mode === 'away') return mode;
+  return [...sockets.values()].every(Boolean) ? 'away' : 'online';
+}
+
 export function isOnline(userId) {
-  return onlineSockets.has(userId);
+  return presenceOf(userId) !== 'offline';
 }
 
 // Комнаты, куда уходят события канала: у открытого канала сообщества —
@@ -80,7 +100,14 @@ export function emitToUser(userId, event, payload) {
 
 // О том, что человек зашёл или вышел, узнают те, кто может его видеть:
 // сообщества, где он состоит, и собеседники по личной переписке.
-async function broadcastPresence(userId, online) {
+// Свои же вкладки тоже получают событие: так режим и подпись совпадают
+// во всех открытых окнах. force — разослать, даже если присутствие не
+// поменялось (поменялась подпись).
+async function broadcastPresence(userId, { force = false } = {}) {
+  const presence = presenceOf(userId);
+  if (!force && lastPresence.get(userId) === presence) return;
+  lastPresence.set(userId, presence);
+  const status = await getStatus(userId);
   const { rows } = await query(
     `SELECT 'community:' || community_id AS room FROM community_members WHERE user_id = $1
      UNION
@@ -90,7 +117,26 @@ async function broadcastPresence(userId, online) {
      WHERE mine.user_id = $1`,
     [userId],
   );
-  if (rows.length) io.to(rows.map((r) => r.room)).emit('presence', { user_id: userId, online });
+  const rooms = [`user:${userId}`, ...rows.map((r) => r.room)];
+  io?.to(rooms).emit('presence', {
+    user_id: userId,
+    online: presence !== 'offline',
+    presence,
+    status,
+  });
+  // Выбранный режим — только своим вкладкам: остальным незачем знать,
+  // что человек «невидимка».
+  io?.to(`user:${userId}`).emit('my_presence', { mode: presenceModes.get(userId) ?? 'online', status });
+}
+
+// Человек сменил режим или подпись — рассылаем сразу.
+export function setPresenceMode(userId, mode) {
+  presenceModes.set(userId, mode);
+  return broadcastPresence(userId, { force: true }).catch(() => {});
+}
+
+export function announceStatus(userId) {
+  return broadcastPresence(userId, { force: true }).catch(() => {});
 }
 
 export function initRealtime(httpServer) {
@@ -132,18 +178,30 @@ export function initRealtime(httpServer) {
     socket.join(`user:${userId}`);
     socket.data.typingAt = new Map();
 
-    const count = (onlineSockets.get(userId) ?? 0) + 1;
-    onlineSockets.set(userId, count);
-    if (count === 1) broadcastPresence(userId, true).catch(() => {});
+    const sockets = onlineSockets.get(userId) ?? new Map();
+    sockets.set(socket.id, false);
+    onlineSockets.set(userId, sockets);
+    // Режим берём из базы до рассылки: «невидимка» не должен мелькнуть
+    // «в сети» при подключении.
+    query('SELECT presence_mode FROM users WHERE id = $1', [userId])
+      .then(({ rows }) => {
+        if (rows[0]) presenceModes.set(userId, rows[0].presence_mode);
+      })
+      .catch(() => {})
+      .then(() => broadcastPresence(userId))
+      .catch(() => {});
+
+    // Вкладка сообщает, что человек давно ничего не делает (или вернулся).
+    socket.on('activity', (payload) => {
+      if (!sockets.has(socket.id)) return;
+      sockets.set(socket.id, payload?.idle === true);
+      broadcastPresence(userId).catch(() => {});
+    });
 
     socket.on('disconnect', () => {
-      const left = (onlineSockets.get(userId) ?? 1) - 1;
-      if (left > 0) {
-        onlineSockets.set(userId, left);
-        return;
-      }
-      onlineSockets.delete(userId);
-      broadcastPresence(userId, false).catch(() => {});
+      sockets.delete(socket.id);
+      if (sockets.size === 0) onlineSockets.delete(userId);
+      broadcastPresence(userId).catch(() => {});
     });
 
     socket.on('join_channel', async (channelId, ack) => {

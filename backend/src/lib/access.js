@@ -165,6 +165,8 @@ export const PERMISSIONS = {
   manage_tags: 'moderator',        // создавать теги и выставлять их участникам
   manage_channels: 'moderator',    // создавать каналы, делать их закрытыми
   post_read_only: 'moderator',     // писать в каналы «только для чтения»
+  manage_emojis: 'moderator',      // загружать и удалять эмодзи и стикеры сообщества
+  manage_events: 'moderator',      // создавать, менять и отменять события
   manage_roles: 'owner',           // назначать и снимать модераторов
   manage_community: 'owner',       // переименовывать сообщество
   view_analytics: 'owner',         // смотреть аналитику
@@ -183,7 +185,10 @@ export function permissionsFor(role) {
 
 // В замороженном платформой сообществе ничего нового не создаётся и не
 // настраивается. Удалять нарушения и исключать людей при этом можно.
-const BLOCKED_WHEN_FROZEN = new Set(['manage_tags', 'manage_channels', 'manage_community', 'manage_roles', 'pin_messages']);
+const BLOCKED_WHEN_FROZEN = new Set([
+  'manage_tags', 'manage_channels', 'manage_community', 'manage_roles', 'pin_messages',
+  'manage_emojis', 'manage_events',
+]);
 
 export async function requirePermission(userId, communityId, permission) {
   const { role, platform_status: status } = await membership(userId, communityId);

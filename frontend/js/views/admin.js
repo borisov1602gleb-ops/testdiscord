@@ -50,6 +50,7 @@ const ACTION_LABELS = {
   community_deleted: 'Удалил сообщество',
   community_transferred: 'Передал сообщество',
   community_inspection: 'Открыл сообщество для проверки',
+  community_emoji_removed: 'Убрал эмодзи или стикер сообщества',
   appeal_accepted: 'Удовлетворил обжалование',
   appeal_rejected: 'Отклонил обжалование',
   settings_changed: 'Изменил настройки платформы',
@@ -654,6 +655,26 @@ async function communityDetail(body, communityId) {
           platformCan('view_users') && el('button', { class: 'btn btn-ghost btn-sm', type: 'button', text: 'Карточка', onclick: () => userDetail(body, m.id) }),
         ]),
       ])),
+    ]),
+    data.emojis?.length > 0 && el('section', { class: 'settings-section' }, [
+      el('p', { class: 'settings-kicker', text: `Свои эмодзи и стикеры · ${data.emojis.length}` }),
+      el('div', { class: 'emoji-admin-grid' }, data.emojis.map((e) => el('div', { class: 'emoji-admin-item' }, [
+        el('img', { src: e.url, alt: e.name, loading: 'lazy' }),
+        el('span', { text: `${e.kind === 'emoji' ? 'эмодзи' : 'стикер'} · ${e.name}` }),
+        el('button', {
+          class: 'btn btn-ghost btn-sm', type: 'button', text: 'Убрать',
+          onclick: () => actionDialog({
+            title: `Убрать ${e.kind === 'emoji' ? 'эмодзи' : 'стикер'} «${e.name}»`,
+            hint: 'Пропадёт из сообщества у всех. В старых сообщениях будет «стикер удалён» или текст :имя:.',
+            confirmText: 'Убрать',
+            danger: true,
+            reasonLabel: 'Причина — попадёт в журнал',
+            onConfirm: ({ reason }) => api(`/platform/staff/communities/${communityId}/emojis/${e.id}/remove`, {
+              method: 'POST', body: { reason },
+            }).then(refresh),
+          }),
+        }),
+      ]))),
     ]),
     data.sanctions.length > 0 && el('section', { class: 'settings-section' }, [
       el('p', { class: 'settings-kicker', text: 'История решений' }),

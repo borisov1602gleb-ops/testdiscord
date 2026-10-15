@@ -18,8 +18,9 @@ import { parseUuid } from '../lib/validate.js';
 import { emitToChannel } from '../lib/realtime.js';
 import { PUBLIC_NAME_SQL, publicNameSql } from '../lib/users.js';
 import { describeAttachment } from './attachments.js';
-import { avatarUrl } from '../lib/signed-urls.js';
+import { avatarUrl, attachmentUrl } from '../lib/signed-urls.js';
 import { notifyModerators } from '../lib/reports.js';
+import { findEmoji } from './emojis.js';
 
 export const messagesRouter = Router();
 
@@ -41,8 +42,10 @@ const SEARCH_MIN = 2;
 const SEARCH_MAX = 100;
 const SEARCH_LIMIT = 30;
 // Реакции — из короткого фиксированного набора. Произвольный текст в
-// реакции — это ещё один канал для спама и мусора в базе.
+// реакции — это ещё один канал для спама и мусора в базе. В сообществе к
+// ним добавляются его свои эмодзи — в виде «:имя:».
 export const REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🔥'];
+const CUSTOM_REACTION_RE = /^:([\p{L}\p{N}_]{2,32}):$/u;
 const SNIPPET_LENGTH = 120;
 // Упоминание тега разворачивается в людей: предел выше, чем для ручных
 // упоминаний, но не бесконечный.
@@ -73,6 +76,8 @@ const MESSAGE_SELECT = `
   SELECT m.id, m.channel_id, m.user_id, m.content, m.created_at,
          m.edited_at, m.deleted_at, m.reply_to, m.thread_id, m.pinned_at,
          m.platform_removed_at,
+         st.id AS sticker_id, st.name AS sticker_name, st.attachment_id AS sticker_attachment_id,
+         st.deleted_at AS sticker_deleted_at,
          ch.community_id, ch.type AS channel_type, ch.name AS channel_name,
          ${PUBLIC_NAME_SQL} AS author_name, u.avatar_id AS author_avatar_id,
          r.id AS reply_id, r.content AS reply_content, r.deleted_at AS reply_deleted_at,
@@ -95,6 +100,7 @@ const MESSAGE_SELECT = `
   LEFT JOIN messages r ON r.id = m.reply_to
   LEFT JOIN users ru ON ru.id = r.user_id
   LEFT JOIN attachments a ON a.id = m.attachment_id AND m.deleted_at IS NULL
+  LEFT JOIN community_emojis st ON st.id = m.sticker_id AND m.deleted_at IS NULL
   LEFT JOIN LATERAL (
     SELECT count(*)::int AS thread_count, max(t.created_at) AS thread_last_at
     FROM messages t WHERE t.thread_id = m.id AND t.deleted_at IS NULL
@@ -149,8 +155,10 @@ async function hydrate(rows) {
 
   return rows.map((row) => {
     const deleted = row.deleted_at !== null;
+    // Сначала стандартные реакции по порядку набора, потом свои эмодзи.
+    const order = (emoji) => (REACTIONS.includes(emoji) ? REACTIONS.indexOf(emoji) : REACTIONS.length);
     const reactionList = (reactionsBy.get(row.id) ?? [])
-      .sort((x, y) => REACTIONS.indexOf(x.emoji) - REACTIONS.indexOf(y.emoji));
+      .sort((x, y) => order(x.emoji) - order(y.emoji));
     return {
       id: row.id,
       channel_id: row.channel_id,
@@ -181,6 +189,15 @@ async function hydrate(rows) {
         }
         : null,
       attachment: describeAttachment(row),
+      // Удалённый стикер в старом сообщении — «стикер удалён», без картинки.
+      sticker: row.sticker_id
+        ? {
+          id: row.sticker_id,
+          name: row.sticker_name,
+          removed: row.sticker_deleted_at !== null,
+          url: row.sticker_deleted_at === null ? attachmentUrl(row.sticker_attachment_id) : null,
+        }
+        : null,
       reactions: deleted ? [] : reactionList,
       mentions: deleted ? [] : (mentionsBy.get(row.id) ?? []),
       tag_mentions: deleted ? [] : (tagMentionsBy.get(row.id) ?? []),
@@ -388,9 +405,11 @@ messagesRouter.post(
       ? parseUuid(req.body.attachment_id, 'attachment_id')
       : null;
     const poll = parsePoll(req.body?.poll);
+    const stickerId = req.body?.sticker_id ? parseUuid(req.body.sticker_id, 'sticker_id') : null;
     // Картинку или опрос можно отправить без подписи — тогда текст не
-    // обязателен.
-    const content = parseContent(req.body?.content, { allowEmpty: Boolean(attachmentId || poll) });
+    // обязателен. Стикер — всегда отдельное сообщение без текста.
+    const content = parseContent(req.body?.content, { allowEmpty: Boolean(attachmentId || poll || stickerId) });
+    if (stickerId && (content || attachmentId || poll)) throw new HttpError(400, 'sticker_must_be_alone');
     const replyTo = req.body?.reply_to ? parseUuid(req.body.reply_to, 'reply_to') : null;
     const threadId = req.body?.thread_id ? parseUuid(req.body.thread_id, 'thread_id') : null;
 
@@ -431,6 +450,16 @@ messagesRouter.post(
       );
       if (rows.length === 0) throw new HttpError(400, 'invalid_attachment');
     }
+    if (stickerId) {
+      // Стикер — только живой стикер этого же сообщества; в личке своих
+      // стикеров нет.
+      const { rows } = await query(
+        `SELECT 1 FROM community_emojis
+         WHERE id = $1 AND kind = 'sticker' AND deleted_at IS NULL AND community_id = $2`,
+        [stickerId, channel.community_id],
+      );
+      if (rows.length === 0) throw new HttpError(400, 'invalid_sticker');
+    }
     const tagMentions = await parseTagMentions(req.body?.tag_mentions, channel);
     const mentions = await expandTagMentions(
       tagMentions, channel, req.user.id,
@@ -439,9 +468,9 @@ messagesRouter.post(
 
     const { messageId, read } = await withTransaction(async (client) => {
       const { rows } = await client.query(
-        `INSERT INTO messages (channel_id, user_id, content, reply_to, attachment_id, thread_id)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, created_at`,
-        [channelId, req.user.id, content, replyTo, attachmentId, threadId],
+        `INSERT INTO messages (channel_id, user_id, content, reply_to, attachment_id, thread_id, sticker_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, created_at`,
+        [channelId, req.user.id, content, replyTo, attachmentId, threadId, stickerId],
       );
       await saveMentions(client, rows[0].id, mentions);
       await saveTagMentions(client, rows[0].id, tagMentions);
@@ -492,6 +521,7 @@ messagesRouter.post(
       ...(channel.type === 'direct' ? { is_direct: true } : {}),
       ...(threadId ? { thread_id: threadId } : {}),
       ...(poll ? { has_poll: true } : {}),
+      ...(stickerId ? { has_sticker: true } : {}),
     });
 
     res.status(201).json({ message });
@@ -675,10 +705,12 @@ messagesRouter.patch(
 
     const { rows: current } = await query(
       `SELECT attachment_id IS NOT NULL
-              OR EXISTS (SELECT 1 FROM polls WHERE message_id = $1) AS has_body
+              OR EXISTS (SELECT 1 FROM polls WHERE message_id = $1) AS has_body,
+              sticker_id IS NOT NULL AS is_sticker
        FROM messages WHERE id = $1`,
       [messageId],
     );
+    if (current[0].is_sticker) throw new HttpError(400, 'cannot_edit_sticker');
     const content = parseContent(req.body?.content, { allowEmpty: current[0].has_body });
     const tagMentions = await parseTagMentions(req.body?.tag_mentions, target.channel);
     const mentions = await expandTagMentions(
@@ -787,14 +819,27 @@ messagesRouter.put(
   requireAuth,
   asyncHandler(async (req, res) => {
     const messageId = parseUuid(req.params.id, 'message_id');
-    const emoji = String(req.body?.emoji ?? '');
-    if (!REACTIONS.includes(emoji)) {
+    const custom = CUSTOM_REACTION_RE.exec(String(req.body?.emoji ?? ''));
+    // Имена своих эмодзи хранятся строчными — так «:Кот:» и «:кот:» одно.
+    const emoji = custom ? `:${custom[1].toLowerCase()}:` : String(req.body?.emoji ?? '');
+    if (!REACTIONS.includes(emoji) && !custom) {
       throw new HttpError(400, 'invalid_reaction', { allowed: REACTIONS });
     }
     requireNotMuted(req.user);
     const target = await getMessageForUser(messageId, req.user.id);
     if (target.deleted_at) throw new HttpError(410, 'message_deleted');
     requireChannelWritable(target.channel);
+    // Свой эмодзи ставится только в его сообществе и только пока он есть.
+    // Снять уже поставленную реакцию можно, даже если эмодзи удалили.
+    if (custom) {
+      const { rows: mine } = await query(
+        'SELECT 1 FROM message_reactions WHERE message_id = $1 AND user_id = $2 AND emoji = $3',
+        [messageId, req.user.id, emoji],
+      );
+      if (mine.length === 0 && (target.channel.type === 'direct' || !(await findEmoji(target.channel.community_id, custom[1])))) {
+        throw new HttpError(400, 'invalid_reaction', { allowed: REACTIONS });
+      }
+    }
 
     const removed = await query(
       `DELETE FROM message_reactions
