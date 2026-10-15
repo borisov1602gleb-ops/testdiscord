@@ -11,6 +11,7 @@ import { requireAuth } from '../middleware/auth.js';
 import {
   requireMembership, getChannel, requireChannelAccess, isChatChannel, hasPermission,
   requireCanPost, usersWithAccess, channelVisibleSql, requireChannelWritable,
+  requireReadRole, requireChannelRead,
 } from '../lib/access.js';
 import { requireNotMuted } from '../lib/platform.js';
 import { parseUuid } from '../lib/validate.js';
@@ -246,10 +247,12 @@ async function getMessageForUser(messageId, userId) {
 }
 
 // Канал, в котором человек может читать и писать.
-async function getChatChannel(channelId, userId) {
+// read — только чтение: тогда пускаем и сотрудника платформы с
+// действующей проверкой сообщества (роль 'inspector').
+async function getChatChannel(channelId, userId, { read = false } = {}) {
   const channel = await getChannel(channelId);
   if (!isChatChannel(channel)) throw new HttpError(400, 'channel_is_not_text');
-  const role = await requireChannelAccess(userId, channel);
+  const role = read ? await requireChannelRead(userId, channel) : await requireChannelAccess(userId, channel);
   return { channel, role };
 }
 
@@ -508,15 +511,18 @@ messagesRouter.get(
     let scope;
     const params = [req.user.id];
     if (req.query.channel_id) {
-      const { channel } = await getChatChannel(parseUuid(req.query.channel_id, 'channel_id'), req.user.id);
+      const { channel } = await getChatChannel(parseUuid(req.query.channel_id, 'channel_id'), req.user.id, { read: true });
       params.push(channel.id);
       scope = 'm.channel_id = $2';
     } else {
       const communityId = parseUuid(req.query.community_id, 'community_id');
-      await requireMembership(req.user.id, communityId);
+      const role = await requireReadRole(req.user.id, communityId);
       params.push(communityId);
-      // Закрытые каналы, которых человек не видит, в поиск не попадают.
-      scope = `ch.community_id = $2 AND ch.type = 'text' AND EXISTS (
+      // Закрытые каналы, которых человек не видит, в поиск не попадают;
+      // при проверке службой платформы — только открытые каналы.
+      scope = role === 'inspector'
+        ? "ch.community_id = $2 AND ch.type = 'text' AND NOT ch.is_private"
+        : `ch.community_id = $2 AND ch.type = 'text' AND EXISTS (
         SELECT 1 FROM community_members cm
         WHERE cm.community_id = ch.community_id AND cm.user_id = $1
           AND ${channelVisibleSql('ch', 'cm')})`;
@@ -539,7 +545,7 @@ messagesRouter.get(
   '/pinned',
   requireAuth,
   asyncHandler(async (req, res) => {
-    const { channel } = await getChatChannel(parseUuid(req.query.channel_id, 'channel_id'), req.user.id);
+    const { channel } = await getChatChannel(parseUuid(req.query.channel_id, 'channel_id'), req.user.id, { read: true });
     const { rows } = await query(
       `${MESSAGE_SELECT}
        WHERE m.channel_id = $2 AND m.pinned_at IS NOT NULL AND m.deleted_at IS NULL
@@ -564,7 +570,7 @@ messagesRouter.get(
   asyncHandler(async (req, res) => {
     const channelId = parseUuid(req.query.channel_id, 'channel_id');
     const limit = parseLimit(req.query.limit);
-    await getChatChannel(channelId, req.user.id);
+    await getChatChannel(channelId, req.user.id, { read: true });
 
     if (req.query.thread_id) {
       const threadId = parseUuid(req.query.thread_id, 'thread_id');

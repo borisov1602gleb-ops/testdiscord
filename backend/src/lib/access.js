@@ -3,6 +3,7 @@
 // ограничено участниками.
 import { query } from '../db.js';
 import { HttpError } from './http.js';
+import { activeInspection } from './platform.js';
 
 // Удалённое платформой сообщество не видно никому — даже его участникам.
 async function membership(userId, communityId) {
@@ -19,6 +20,34 @@ async function membership(userId, communityId) {
 
 export async function requireMembership(userId, communityId) {
   return (await membership(userId, communityId)).role;
+}
+
+// Только для чтения: участник — со своей ролью, сотрудник платформы с
+// действующей проверкой — с ролью 'inspector'. Писать проверяющий не
+// может: все записывающие маршруты проверяют обычное членство.
+export async function requireReadRole(userId, communityId) {
+  try {
+    return await requireMembership(userId, communityId);
+  } catch (err) {
+    if (err.message === 'not_a_community_member' && (await activeInspection(userId, communityId))) {
+      return 'inspector';
+    }
+    throw err;
+  }
+}
+
+// Канал на чтение: проверяющему — только открытые каналы сообщества;
+// закрытые каналы и личная переписка в проверку не входят.
+export async function requireChannelRead(userId, channel) {
+  try {
+    return await requireChannelAccess(userId, channel);
+  } catch (err) {
+    if (err.message === 'not_a_community_member' && channel.type !== 'direct' && !channel.is_private
+      && (await activeInspection(userId, channel.community_id))) {
+      return 'inspector';
+    }
+    throw err;
+  }
 }
 
 // Состояние сообщества на платформе: active, invites_hidden, frozen, deleted.

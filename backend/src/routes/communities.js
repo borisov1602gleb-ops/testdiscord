@@ -7,10 +7,10 @@ import { requireAuth } from '../middleware/auth.js';
 import { logEvent, EVENT_TYPES } from '../lib/events.js';
 import {
   requireMembership, requirePermission, hasPermission, permissionsFor, ROLE_RANK,
-  channelVisibleSql, getChannel,
+  channelVisibleSql, getChannel, requireReadRole,
 } from '../lib/access.js';
 import { parseUuid } from '../lib/validate.js';
-import { requireNotMuted, getSetting } from '../lib/platform.js';
+import { requireNotMuted, getSetting, activeInspection } from '../lib/platform.js';
 import { PUBLIC_NAME_SQL, publicNameSql } from '../lib/users.js';
 import { avatarUrl } from '../lib/signed-urls.js';
 import { rawBody, contentTypeOf, saveUpload, IMAGE_TYPES } from './attachments.js';
@@ -223,7 +223,8 @@ communitiesRouter.get(
   requireAuth,
   asyncHandler(async (req, res) => {
     const communityId = parseUuid(req.params.id, 'community_id');
-    await requireMembership(req.user.id, communityId);
+    // Проверяющему службы платформы непрочитанные не считаются.
+    if ((await requireReadRole(req.user.id, communityId)) === 'inspector') return res.json({ channels: [] });
     const rows = await unreadByChannel(req.user.id, communityId);
     res.json({
       // last_read_at нужен клиенту, чтобы провести черту «Новые сообщения».
@@ -241,7 +242,8 @@ communitiesRouter.get(
   requireAuth,
   asyncHandler(async (req, res) => {
     const communityId = parseUuid(req.params.id, 'community_id');
-    await requireMembership(req.user.id, communityId);
+    // Проверка — по переписке; кто сейчас в звонках, проверяющему не нужно.
+    if ((await requireReadRole(req.user.id, communityId)) === 'inspector') return res.json({ channels: {} });
     const { rows } = await query(
       `SELECT c.channel_id, cp.user_id, cp.joined_at,
               CASE WHEN u.id IS NULL THEN 'Гость' ELSE ${PUBLIC_NAME_SQL} END AS name
@@ -274,26 +276,37 @@ communitiesRouter.get(
     const { rows } = await query('SELECT * FROM communities WHERE id = $1', [req.params.id]);
     if (rows.length === 0) throw new HttpError(404, 'community_not_found');
 
-    const role = await requireMembership(req.user.id, req.params.id);
+    const role = await requireReadRole(req.user.id, req.params.id);
     // Закрытые каналы, которые человеку не видны, в список не попадают
-    // вовсе — даже названием.
-    const { rows: channels } = await query(
-      `SELECT ch.id, ch.community_id, ch.name, ch.type, ch.created_at, ch.is_private, ch.read_only,
-              COALESCE((SELECT array_agg(tag_id) FROM channel_allowed_tags WHERE channel_id = ch.id), '{}')
-                AS allowed_tag_ids
-       FROM channels ch
-       JOIN community_members cm ON cm.community_id = ch.community_id AND cm.user_id = $2
-       WHERE ch.community_id = $1 AND ${channelVisibleSql('ch', 'cm')}
-       ORDER BY ch.type, ch.created_at`,
-      [req.params.id, req.user.id],
-    );
+    // вовсе — даже названием. Проверяющему службы платформы — только
+    // открытые текстовые каналы.
+    const { rows: channels } = role === 'inspector'
+      ? await query(
+        `SELECT ch.id, ch.community_id, ch.name, ch.type, ch.created_at, ch.is_private, ch.read_only,
+                '{}'::uuid[] AS allowed_tag_ids
+         FROM channels ch
+         WHERE ch.community_id = $1 AND ch.type = 'text' AND NOT ch.is_private
+         ORDER BY ch.created_at`,
+        [req.params.id],
+      )
+      : await query(
+        `SELECT ch.id, ch.community_id, ch.name, ch.type, ch.created_at, ch.is_private, ch.read_only,
+                COALESCE((SELECT array_agg(tag_id) FROM channel_allowed_tags WHERE channel_id = ch.id), '{}')
+                  AS allowed_tag_ids
+         FROM channels ch
+         JOIN community_members cm ON cm.community_id = ch.community_id AND cm.user_id = $2
+         WHERE ch.community_id = $1 AND ${channelVisibleSql('ch', 'cm')}
+         ORDER BY ch.type, ch.created_at`,
+        [req.params.id, req.user.id],
+      );
 
     const { avatar_id: avatarId, ...community } = rows[0];
     res.json({
       community: { ...community, avatar_url: avatarUrl(avatarId) },
       channels,
       role,
-      permissions: permissionsFor(role),
+      permissions: role === 'inspector' ? [] : permissionsFor(role),
+      inspection: role === 'inspector' ? await activeInspection(req.user.id, req.params.id) : null,
     });
   }),
 );
@@ -303,7 +316,7 @@ communitiesRouter.get(
   requireAuth,
   asyncHandler(async (req, res) => {
     const communityId = parseUuid(req.params.id, 'community_id');
-    await requireMembership(req.user.id, communityId);
+    await requireReadRole(req.user.id, communityId);
     // Имя берём тем же выражением, что и в чате: как человек назвался, так
     // он и выглядит везде, включая скрытую почту.
     const [members, tags] = await Promise.all([listMembers(communityId), listTags(communityId)]);

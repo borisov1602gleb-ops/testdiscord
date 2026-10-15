@@ -17,7 +17,7 @@ import { PUBLIC_NAME_SQL, publicNameSql } from '../lib/users.js';
 import { config } from '../config.js';
 import {
   PLATFORM_RANK, platformCan, platformPermissionsFor, requirePlatform, outranks, isStaff,
-  invalidateStanding, audit, SETTINGS, getSettings,
+  invalidateStanding, audit, SETTINGS, getSettings, INSPECTION_MINUTES,
 } from '../lib/platform.js';
 import { notifyPlatformStaff, notifyStanding, platformQueueCounts, countsFor } from '../lib/platform-notify.js';
 import {
@@ -1007,6 +1007,38 @@ platformRouter.post(
     notifyStanding(community.owner_id);
     await notifyPlatformStaff();
     res.json({ status });
+  }),
+);
+
+// Открыть сообщество для проверки: на час, только чтение открытых
+// каналов, с обязательной причиной. Сообщество об этом не узнаёт; сама
+// проверка — в журнале.
+platformRouter.post(
+  '/staff/communities/:id/inspect',
+  requirePlatform('inspect_communities'),
+  asyncHandler(async (req, res) => {
+    const communityId = parseUuid(req.params.id, 'community_id');
+    const reason = requireReason(req.body?.reason);
+    const reportId = optionalReportId(req.body?.report_id);
+    const { rows } = await query('SELECT id, name, platform_status, purged_at FROM communities WHERE id = $1', [communityId]);
+    if (rows.length === 0) throw new HttpError(404, 'community_not_found');
+    if (rows[0].purged_at) throw new HttpError(409, 'community_already_purged');
+    // Удалённое никому не показывается — смотреть в нём нечего.
+    if (rows[0].platform_status === 'deleted') throw new HttpError(409, 'community_deleted');
+    const inspection = await withTransaction(async (client) => {
+      const { rows: [created] } = await client.query(
+        `INSERT INTO platform_inspections (staff_id, community_id, report_id, reason, expires_at)
+         VALUES ($1, $2, $3, $4, now() + make_interval(mins => $5))
+         RETURNING id, expires_at`,
+        [req.user.id, communityId, reportId, reason, INSPECTION_MINUTES],
+      );
+      await audit(req.user, 'community_inspection', {
+        targetType: 'community', targetId: communityId, reason,
+        details: { inspection_id: created.id, report_id: reportId, minutes: INSPECTION_MINUTES, name: rows[0].name },
+      }, client);
+      return created;
+    });
+    res.status(201).json({ inspection });
   }),
 );
 

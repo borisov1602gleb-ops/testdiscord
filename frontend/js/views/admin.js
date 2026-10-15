@@ -49,6 +49,7 @@ const ACTION_LABELS = {
   community_frozen: 'Заморозил сообщество',
   community_deleted: 'Удалил сообщество',
   community_transferred: 'Передал сообщество',
+  community_inspection: 'Открыл сообщество для проверки',
   appeal_accepted: 'Удовлетворил обжалование',
   appeal_rejected: 'Отклонил обжалование',
   settings_changed: 'Изменил настройки платформы',
@@ -151,6 +152,26 @@ function download(name, data) {
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+// «Провалиться» в сообщество: открыть его как есть, но только для
+// чтения и только открытые каналы. Причина обязательна, вход — в журнал,
+// сообщество не уведомляется. Доступ сам закрывается через час.
+function inspectButton(community, { reportId = null } = {}) {
+  if (!platformCan('inspect_communities') || community.status === 'deleted' || community.platform_status === 'deleted') return null;
+  return el('button', {
+    class: 'btn btn-secondary btn-sm', type: 'button', text: 'Открыть для проверки',
+    onclick: () => actionDialog({
+      title: `Проверка: ${community.name}`,
+      hint: 'Сообщество откроется у вас только для чтения: открытые каналы и список участников, на 1 час. Закрытые каналы и личные переписки не видны. Сообщество не уведомляется, вход записывается в журнал.',
+      reasonLabel: 'Зачем открываете — попадёт в журнал',
+      confirmText: 'Открыть',
+      onConfirm: async ({ reason }) => {
+        await api(`/platform/staff/communities/${community.id}/inspect`, { method: 'POST', body: { reason, report_id: reportId } });
+        navigate(`#/c/${community.id}`);
+      },
+    }),
+  });
 }
 
 // Кнопки мер против человека — по правам того, кто смотрит.
@@ -289,6 +310,8 @@ async function reportDetail(body, reportId, filter) {
   });
 
   const actions = [];
+  const inspect = report.community && inspectButton(report.community, { reportId });
+  if (inspect) actions.push(inspect);
   if (open && !escalatedLocked) {
     if (report.message && !report.message.removed) {
       actions.push(el('button', {
@@ -606,6 +629,7 @@ async function communityDetail(body, communityId) {
         ]),
         el('div', { class: 'row-actions' }, [pill(COMMUNITY_STATUS_LABELS[c.platform_status], c.platform_status === 'active' ? 'ok' : 'danger')]),
       ]),
+      inspectButton(c) && el('div', { class: 'admin-actions' }, [inspectButton(c)]),
       statusButtons.length > 0 && el('div', { class: 'admin-actions' }, statusButtons),
     ]),
     el('section', { class: 'settings-section' }, [
