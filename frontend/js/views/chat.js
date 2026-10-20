@@ -232,10 +232,10 @@ export function createChat({
       [
         icon('reply', 12),
         el('span', { class: 'msg-reply-author', text: reply.author_name ?? '' }),
-        el('span', {
-          class: 'msg-reply-text',
-          text: reply.deleted ? 'сообщение удалено' : reply.snippet || 'вложение',
-        }),
+        // В цитате свои эмодзи тоже картинками, а не «:имя:».
+        el('span', { class: 'msg-reply-text' }, reply.deleted || !reply.snippet
+          ? [reply.deleted ? 'сообщение удалено' : 'вложение']
+          : renderRich(reply.snippet, { emojis: emojiMap() })),
       ],
     );
   }

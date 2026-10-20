@@ -5881,3 +5881,10 @@ button.tag-chip.is-active {
     height: 36px;
   }
 }
+
+/* Свой эмодзи в цитате ответа — под размер строки. */
+.msg-reply-text .msg-emoji {
+  width: 15px;
+  height: 15px;
+  vertical-align: -3px;
+}
