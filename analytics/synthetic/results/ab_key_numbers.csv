@@ -1,0 +1,12 @@
+name,value
+n_A,12070.0
+n_B,11808.0
+srm_p_value,0.08997726318235344
+baseline_p1,0.42806484295846
+mde,0.03
+sample_size_per_group,4304.0
+duration_days,14.0
+lift_relative,0.2277501825489583
+z,14.874016922858331
+aa_false_positive_rate,0.036
+aa_ks_p_value,0.06238728518391723
