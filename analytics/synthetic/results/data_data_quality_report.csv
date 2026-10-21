@@ -1,0 +1,11 @@
+проверка,ошибок,доля_ошибок
+event_id_unique,4556,0.014768089775464096
+person_id_not_null,924,0.0029951086375173013
+required_fields_present,826,0.0026774456002048603
+community_in_dictionary,615,0.0019934976321137883
+enum_values_allowed,567,0.0018379075730219803
+timestamp_not_future,309,0.001001611005403513
+event_id_not_null,306,0.000991886626710275
+duration_non_negative,62,0.00020097049299358516
+event_type_allowed,0,0.0
+invite_in_dictionary,0,0.0
