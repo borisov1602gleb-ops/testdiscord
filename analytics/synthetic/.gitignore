@@ -1,0 +1,5 @@
+# Данные и графики воспроизводятся запуском кода — в репозиторий не кладём.
+output/
+ab_experiment/data/
+ab_experiment/charts/
+__pycache__/

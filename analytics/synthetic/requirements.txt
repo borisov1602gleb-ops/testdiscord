@@ -1,0 +1,8 @@
+numpy>=1.24
+pandas>=2.0
+matplotlib>=3.7
+# Только для ab_experiment/ (статистика, ноутбук):
+scipy>=1.10
+nbformat
+nbconvert
+ipykernel
